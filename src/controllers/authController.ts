@@ -1,34 +1,55 @@
 import { Request, Response } from 'express';
-import jwt from 'jsonwebtoken';
+import jwt, { Secret, SignOptions } from 'jsonwebtoken';
 import User from '../models/User';
 import Token from '../models/Token';
+import config from '../config';
+import crypto from 'crypto';
+
+const generateDeviceId = (telegramId: string, userAgent: string) => {
+  return crypto
+    .createHash('md5')
+    .update(`${telegramId}-${userAgent}-${Date.now()}`)
+    .digest('hex');
+};
 
 const createAndSaveToken = async (
   user: any,
-  req: Request
+  req: Request,
+  platform = 'telegram'
 ): Promise<string> => {
-  // Создаем JWT токен с userId и telegramId
+  // Создаем уникальный идентификатор устройства
+  const deviceId = generateDeviceId(user.telegramId.toString(), req.headers['user-agent'] || 'unknown');
+
+  // Деактивируем старые токены для этой платформы
+  await Token.deactivateOldTokens(user.telegramId.toString(), platform);
+
+  // Создаем JWT токен с расширенной информацией
   const token = jwt.sign(
     { 
       userId: user._id,
-      telegramId: user.telegramId 
+      telegramId: user.telegramId,
+      deviceId,
+      platform
     },
-    process.env.JWT_SECRET || 'your-secret-key',
-    { expiresIn: '30d' }
+    config.jwtSecret as Secret,
+    { expiresIn: config.jwtExpiration } as SignOptions
   );
 
   // Получаем дату истечения токена
   const decoded = jwt.decode(token) as { exp: number };
   const expiresAt = new Date(decoded.exp * 1000);
 
-  // Сохраняем токен в базу данных
+  // Сохраняем токен в базу данных с расширенной информацией
   await Token.create({
     token,
     userId: user._id,
-    telegramId: user.telegramId,
+    telegramId: user.telegramId.toString(),
     expiresAt,
     userAgent: req.headers['user-agent'],
-    ipAddress: req.ip
+    ipAddress: req.ip,
+    deviceId,
+    platform,
+    isValid: true
   });
 
   return token;
@@ -37,6 +58,7 @@ const createAndSaveToken = async (
 export const register = async (req: Request, res: Response): Promise<void> => {
   try {
     const userData = req.body;
+    const platform = req.body.platform || 'telegram';
 
     // Проверяем, существует ли пользователь
     const existingUser = await User.findOne({ telegramId: userData.telegramId });
@@ -50,7 +72,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
     await user.save();
 
     // Создаем и сохраняем токен
-    const token = await createAndSaveToken(user, req);
+    const token = await createAndSaveToken(user, req, platform);
 
     res.status(201).json({
       token,
@@ -70,7 +92,8 @@ export const register = async (req: Request, res: Response): Promise<void> => {
 export const login = async (req: Request, res: Response): Promise<void> => {
   try {
     const { telegramId } = req.body;
-    console.log(telegramId)
+    const platform = req.body.platform || 'telegram';
+
     // Проверяем существование пользователя
     const user = await User.findOne({ telegramId });
     if (!user) {
@@ -78,8 +101,31 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // Создаем и сохраняем токен
-    const token = await createAndSaveToken(user, req);
+    // Проверяем наличие активного токена для данной платформы
+    const existingToken = await Token.findOne({
+      telegramId: telegramId.toString(),
+      platform,
+      isValid: true,
+      expiresAt: { $gt: new Date() }
+    });
+
+    // Если есть активный токен и он не истек, возвращаем его
+    if (existingToken) {
+      res.status(200).json({
+        token: existingToken.token,
+        user: {
+          telegramId: user.telegramId,
+          username: user.username,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          rating: user.rating || 0
+        }
+      });
+      return;
+    }
+
+    // Если нет активного токена, создаем новый
+    const token = await createAndSaveToken(user, req, platform);
 
     res.status(200).json({
       token,
@@ -92,21 +138,19 @@ export const login = async (req: Request, res: Response): Promise<void> => {
       }
     });
   } catch (error) {
-    console.log(error)
+    console.error(error);
     res.status(500).json({ error: 'Ошибка при аутентификации' });
   }
 };
 
 export const logout = async (req: Request, res: Response): Promise<void> => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
+    const token = req.token;
+    if (!token) {
       res.status(401).json({ error: 'Отсутствует токен авторизации' });
       return;
     }
 
-    const token = authHeader.split(' ')[1];
-    
     // Инвалидируем токен
     await Token.findOneAndUpdate(
       { token },
@@ -133,7 +177,7 @@ export const logoutAll = async (req: Request, res: Response): Promise<void> => {
 
     // Инвалидируем все токены пользователя
     await Token.updateMany(
-      { telegramId },
+      { telegramId: telegramId.toString() },
       { 
         isValid: false,
         lastUsedAt: new Date()

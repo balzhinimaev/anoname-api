@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import Chat from '../models/Chat';
 import User from '../models/User';
+import Message from '../models/Message';
+import { ChatService } from '../services/ChatService';
 
 export const createChat = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -56,15 +58,33 @@ export const getUserChats = async (req: Request, res: Response): Promise<void> =
 export const getChatMessages = async (req: Request, res: Response): Promise<void> => {
   try {
     const { chatId } = req.params;
-    const chat = await Chat.findById(chatId)
-      .populate('messages.sender', 'telegramId username firstName lastName');
+    const limit = parseInt(req.query.limit as string) || 50;
+    const before = req.query.before as string; // message ID
 
+    // Проверяем, существует ли чат
+    const chat = await Chat.findById(chatId);
     if (!chat) {
       res.status(404).json({ error: 'Чат не найден' });
       return;
     }
+    
+    // Формируем запрос для сообщений
+    const query: any = { chatId };
+    if (before) {
+      query._id = { $lt: before };
+    }
 
-    res.status(200).json(chat.messages);
+    const messages = await Message.find(query)
+      .limit(limit)
+      .sort({ timestamp: -1 })
+      .populate('sender', 'telegramId username firstName lastName photos');
+
+    if (!messages) {
+      res.status(404).json({ error: 'Сообщения не найдены' });
+      return;
+    }
+
+    res.status(200).json(messages);
   } catch (error) {
     res.status(500).json({ error: 'Ошибка при получении сообщений' });
   }
@@ -105,27 +125,16 @@ export const sendMessage = async (req: Request, res: Response): Promise<void> =>
 export const markMessagesAsRead = async (req: Request, res: Response): Promise<void> => {
   try {
     const { chatId } = req.params;
-    const { userId } = req.body;
+    const { userId, beforeTimestamp } = req.body;
 
-    const chat = await Chat.findByIdAndUpdate(
-      chatId,
-      {
-        $set: {
-          'messages.$[elem].isRead': true
-        }
-      },
-      {
-        arrayFilters: [{ 'elem.sender': { $ne: userId }, 'elem.isRead': false }],
-        new: true
-      }
-    );
-
-    if (!chat) {
-      res.status(404).json({ error: 'Чат не найден' });
+    if (!userId || !beforeTimestamp) {
+      res.status(400).json({ error: 'userId и beforeTimestamp обязательны' });
       return;
     }
 
-    res.status(200).json(chat);
+    await ChatService.markAsRead(chatId, userId, new Date(beforeTimestamp));
+
+    res.status(200).json({ message: 'Сообщения отмечены как прочитанные' });
   } catch (error) {
     res.status(500).json({ error: 'Ошибка при отметке сообщений как прочитанных' });
   }

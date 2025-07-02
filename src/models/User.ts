@@ -41,8 +41,8 @@ export interface IUser extends Document {
   age?: number;
   /** Массив URL фотографий пользователя */
   photos?: string[];
-  /** Статус активности пользователя */
-  isActive: boolean;
+  /** Статус онлайн (есть ли активный сокет) */
+  isOnline: boolean;
   /** Время последней активности */
   lastActive: Date;
   /** Дата создания профиля */
@@ -125,7 +125,7 @@ const UserSchema: Schema = new Schema({
   },
   age: { type: Number, min: 18 },
   photos: [{ type: String }],
-  isActive: { type: Boolean, default: true },
+  isOnline: { type: Boolean, default: false },
   lastActive: { type: Date, default: Date.now },
   
   // === ПОЛЯ МОНЕТИЗАЦИИ ===

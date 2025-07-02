@@ -6,31 +6,14 @@
 import mongoose from 'mongoose';
 
 /**
- * Интерфейс сообщения в чате
- * @interface IMessage
- */
-interface IMessage {
-  /** ID отправителя сообщения */
-  sender: mongoose.Types.ObjectId;
-  /** Текст сообщения */
-  content: string;
-  /** Время отправки сообщения */
-  timestamp: Date;
-  /** Статус прочтения сообщения */
-  isRead: boolean;
-}
-
-/**
  * Интерфейс чата
  * @interface IChat
  */
 export interface IChat {
   /** Массив ID участников чата */
   participants: mongoose.Types.ObjectId[];
-  /** Массив сообщений в чате */
-  messages: IMessage[];
   /** Последнее сообщение в чате */
-  lastMessage?: IMessage;
+  lastMessage?: mongoose.Types.ObjectId;
   /** Тип чата: анонимный или постоянный */
   type: 'anonymous' | 'permanent';
   /** Статус активности чата */
@@ -50,30 +33,6 @@ export interface IChat {
 }
 
 /**
- * Схема сообщения для MongoDB
- * @type {mongoose.Schema}
- */
-const messageSchema = new mongoose.Schema<IMessage>({
-  sender: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
-  },
-  content: {
-    type: String,
-    required: true
-  },
-  timestamp: {
-    type: Date,
-    default: Date.now
-  },
-  isRead: {
-    type: Boolean,
-    default: false
-  }
-});
-
-/**
  * Схема чата для MongoDB
  * @type {mongoose.Schema}
  */
@@ -83,8 +42,10 @@ const chatSchema = new mongoose.Schema<IChat>({
     ref: 'User',
     required: true
   }],
-  messages: [messageSchema],
-  lastMessage: messageSchema,
+  lastMessage: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Message'
+  },
   type: {
     type: String,
     enum: ['anonymous', 'permanent'],

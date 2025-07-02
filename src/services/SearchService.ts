@@ -45,9 +45,13 @@ export class SearchService {
     telegramId: string,
     criteria: SearchCriteria
   ): Promise<SearchResult> {
+    wsLogger.info('search_service_entered', `SearchService.startSearch entered for user ${userId}`, { userId, telegramId });
     // === ПРОВЕРКА МОНЕТИЗАЦИИ ===
+    wsLogger.info('monetization_check_start', `Checking monetization for user ${userId}`, { userId });
     const canSearch = await MonetizationService.canUserSearch(userId);
+    wsLogger.info('monetization_check_end', `Monetization check for user ${userId} completed`, { userId, canSearch });
     if (!canSearch.canSearch) {
+      wsLogger.warn('monetization_fail', `Search denied for user ${userId} due to monetization`, { userId, reason: canSearch.reason });
       throw new Error(canSearch.reason || 'Поиск недоступен');
     }
 
@@ -204,16 +208,12 @@ export class SearchService {
       matchCriteria.rating = { $gte: search.minAcceptableRating };
     }
 
-    // Если мы не используем геолокацию, не учитываем ее в критериях поиска
+    // Если мы не используем геолокацию, ищем только тех, кто тоже ее не использует
     if (!search.useGeolocation) {
-      // Либо другой пользователь также не использует геолокацию, либо мы игнорируем этот параметр
-      matchCriteria.$or = [
-        { useGeolocation: false },
-        { useGeolocation: true }
-      ];
+      matchCriteria.useGeolocation = false;
     }
     // Если используем геолокацию, применяем стандартную логику
-    else if (search.useGeolocation && search.location) {
+    else if (search.useGeolocation && search.location && Array.isArray(search.location.coordinates)) {
       matchCriteria.useGeolocation = true;
       matchCriteria.location = {
         $near: {
@@ -224,6 +224,15 @@ export class SearchService {
           $maxDistance: (search.maxDistance || 10) * 1000 // конвертируем км в метры
         }
       };
+    } else if (search.useGeolocation) {
+      // Логируем случай, когда геолокация включена, но данные некорректны
+      wsLogger.warn('invalid_geo_data_in_find', 'Геолокация включена, но данные отсутствуют или некорректны в документе поиска', {
+        searchId: search._id?.toString(),
+        location: search.location
+      });
+      // В этом случае мы не можем выполнить гео-поиск, поэтому ищем без него.
+      // Это предотвратит падение, но покажет проблему в данных.
+      matchCriteria.useGeolocation = false;
     }
 
     return await Search.find(matchCriteria);
@@ -461,18 +470,9 @@ export class SearchService {
       Search.countDocuments({ status: 'searching', gender: 'female' })
     ]);
 
-    // Получаем количество онлайн пользователей и суммируем из разных источников
-    const [onlineUsers, totalOnlineFromDB] = await Promise.all([
-      User.find({ isActive: true }).select('gender'),
-      User.countDocuments({ isActive: true })
-    ]);
-
-    // Подсчитываем количество мужчин и женщин онлайн
-    let maleOnline = 0;
-    let femaleOnline = 0;
-    onlineUsers.forEach(user => {
-      if (user.gender === 'male') maleOnline++;
-      else if (user.gender === 'female') femaleOnline++;
+    // Получаем общее количество активных пользователей онлайн
+    const totalOnline = await User.countDocuments({
+      isOnline: true
     });
 
     // Получаем статистику по времени поиска и мэтчам за 24 часа
@@ -490,9 +490,9 @@ export class SearchService {
       m: maleSearching,
       f: femaleSearching,
       online: {
-        t: totalOnlineFromDB,
-        m: maleOnline,
-        f: femaleOnline
+        t: totalOnline,
+        m: 0,
+        f: 0
       },
       avgSearchTime: {
         t: 0, // Эти значения могут быть заполнены реальными данными позже

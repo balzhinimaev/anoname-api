@@ -1,70 +1,89 @@
 import Chat from '../models/Chat';
+import Message, { IMessage } from '../models/Message';
 import { wsManager } from '../server';
 import mongoose from 'mongoose';
 import { wsLogger } from '../utils/logger';
 
 export class ChatService {
-  static async sendMessage(chatId: string, userId: string, content: string) {
+  static async sendMessage(
+    chatId: string,
+    userId: string,
+    content: string
+  ): Promise<IMessage> {
     const chat = await Chat.findById(chatId);
     if (!chat) {
       throw new Error('Chat not found');
     }
 
-    if (!chat.participants.some(p => p.toString() === userId)) {
+    if (!chat.participants.some((p) => p.toString() === userId)) {
       throw new Error('User is not a participant of this chat');
     }
 
-    const message = {
+    // 1. Создаем сообщение как отдельный документ
+    const message = await Message.create({
+      chatId: new mongoose.Types.ObjectId(chatId),
       sender: new mongoose.Types.ObjectId(userId),
       content,
-      timestamp: new Date(),
-      isRead: false
-    };
+    });
 
-    chat.messages.push(message);
-    chat.lastMessage = message;
+    // 2. Обновляем lastMessage в чате
+    chat.lastMessage = message._id as mongoose.Types.ObjectId;
     await chat.save();
+    
+    // 3. Загружаем информацию об отправителе для отправки клиенту
+    const messageWithSender = await message.populate(
+      'sender',
+      'telegramId username firstName lastName photos'
+    );
 
-    // Отправляем сообщение всем участникам чата
+    // 4. Отправляем полный объект сообщения всем участникам чата
     wsManager.io.to(`chat:${chatId}`).emit('chat:message', {
       chatId,
-      content,
-      userId
+      message: messageWithSender,
     });
 
-    return message;
+    return messageWithSender;
   }
 
-  static async markAsRead(chatId: string, userId: string, timestamp: Date) {
-    const chat = await Chat.findById(chatId);
-    if (!chat) {
-      throw new Error('Chat not found');
-    }
-
-    // Обновляем статус прочтения сообщений
-    chat.messages = chat.messages.map(msg => {
-      if (msg.timestamp <= timestamp && msg.sender.toString() !== userId) {
-        msg.isRead = true;
+  static async markAsRead(
+    chatId: string,
+    userId: string,
+    beforeTimestamp: Date
+  ) {
+    // Находим все непрочитанные сообщения в чате, отправленные другими пользователями
+    // и полученные до указанной временной метки.
+    await Message.updateMany(
+      {
+        chatId: new mongoose.Types.ObjectId(chatId),
+        sender: { $ne: new mongoose.Types.ObjectId(userId) },
+        timestamp: { $lte: beforeTimestamp },
+        isRead: false,
+      },
+      {
+        $set: { isRead: true },
+        $addToSet: { readBy: new mongoose.Types.ObjectId(userId) },
       }
-      return msg;
-    });
-    await chat.save();
+    );
 
-    // Уведомляем других участников
+    // Уведомляем других участников, что сообщения были прочитаны
     wsManager.io.to(`chat:${chatId}`).emit('chat:read', {
       chatId,
       userId,
-      timestamp
+      timestamp: beforeTimestamp,
     });
   }
 
-  static async endChat(chatId: string, userId: string, reason?: string): Promise<void> {
+  static async endChat(
+    chatId: string,
+    userId: string,
+    reason?: string
+  ): Promise<void> {
     const chat = await Chat.findById(chatId);
     if (!chat) {
       throw new Error('Chat not found');
     }
 
-    if (!chat.participants.some(p => p.toString() === userId)) {
+    if (!chat.participants.some((p) => p.toString() === userId)) {
       throw new Error('User is not a participant of this chat');
     }
 
@@ -84,11 +103,44 @@ export class ChatService {
     wsManager.io.to(`chat:${chatId}`).emit('chat:ended', {
       chatId,
       endedBy: userId,
-      reason
+      reason,
     });
 
     wsLogger.info('chat_ended', `Chat ${chatId} ended by user ${userId}`, {
-      reason
+      reason,
     });
+  }
+
+  static async endChatOnDisconnect(userId: string): Promise<void> {
+    // Находим активный чат, в котором участвовал отключившийся пользователь
+    const activeChat = await Chat.findOne({
+      participants: new mongoose.Types.ObjectId(userId),
+      isActive: true,
+    });
+
+    if (activeChat) {
+      const chatId = activeChat._id.toString();
+      const reason = 'partner_disconnected';
+
+      // Завершаем чат
+      activeChat.isActive = false;
+      activeChat.endedAt = new Date();
+      activeChat.endedBy = new mongoose.Types.ObjectId(userId);
+      activeChat.endReason = reason;
+      await activeChat.save();
+
+      // Уведомляем всех участников (т.е. оставшегося партнера) о завершении чата
+      wsManager.io.to(`chat:${chatId}`).emit('chat:ended', {
+        chatId,
+        endedBy: userId,
+        reason,
+      });
+
+      wsLogger.info(
+        'chat_auto_ended_disconnect',
+        `Chat ${chatId} ended due to user ${userId} disconnect`,
+        { reason }
+      );
+    }
   }
 } 

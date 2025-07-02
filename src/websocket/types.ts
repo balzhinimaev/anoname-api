@@ -1,4 +1,5 @@
 import { Socket } from 'socket.io';
+import { IMessage } from '../models/Message';
 
 export interface ServerToClientEvents {
   // Состояние соединения
@@ -25,14 +26,19 @@ export interface ServerToClientEvents {
       t: number;  // total online
       m: number;  // male online
       f: number;  // female online
-    }
+    };
+    avgSearchTime: {
+      t: number;  // average search time total
+      m: number;  // average search time male
+      f: number;  // average search time female
+      matches24h: number;  // matches in last 24h
+    };
   }) => void;
 
   // Чаты и сообщения
   'chat:message': (data: {
     chatId: string;
-    content: string;
-    userId: string;
+    message: IMessage;
   }) => void;
   'chat:typing': (data: {
     chatId: string;
@@ -65,12 +71,11 @@ export interface ServerToClientEvents {
   }) => void;
 
   'error': (data: { message: string }) => void;
+
+  'search:error': (data: { message: string }) => void;
 }
 
 export interface ClientToServerEvents {
-  // Состояние соединения
-  'connection:ack': () => void;
-
   // Поиск
   'search:start': (data: {
     criteria: {

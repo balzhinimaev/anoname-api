@@ -3,7 +3,7 @@ import { Server as HttpServer } from 'http';
 import { socketAuth } from './middleware/auth';
 import { ClientToServerEvents, ServerToClientEvents, SocketData, TypedSocket } from './types';
 import { ChatService } from '../services/ChatService';
-import { SearchService, SearchCriteria, SearchResult } from '../services/SearchService';
+import { SearchService, SearchCriteria } from '../services/SearchService';
 import { wsLogger } from '../utils/logger';
 import { metricsCollector } from '../utils/metrics';
 import { CircuitBreaker } from '../utils/CircuitBreaker';
@@ -79,7 +79,7 @@ export class WebSocketManager {
       
       // Обновляем статус активности пользователя
       User.findByIdAndUpdate(userId, {
-        isActive: true,
+        isOnline: true,
         lastActive: new Date()
       }).then(() => {
         // Обновляем статистику после изменения статуса
@@ -177,18 +177,23 @@ export class WebSocketManager {
 
       // Обработчики поиска с логированием
       socket.on('search:start', (data) => {
-        const startTime = Date.now();
-        metricsCollector.searchStarted();
-        wsLogger.event('search_start', userId, socket.id, { criteria: data.criteria });
-        this.handleSearchStart(socket, data).then(() => {
-          const duration = Date.now() - startTime;
-          metricsCollector.messageProcessed(duration);
-          metricsCollector.searchCompleted(true);
-        }).catch(error => {
-          metricsCollector.errorOccurred(error as Error);
-          metricsCollector.searchCompleted(false);
-          wsLogger.error(userId, socket.id, error as Error, { event: 'search_start' });
-        });
+        try {
+          const startTime = Date.now();
+          metricsCollector.searchStarted();
+          wsLogger.event('search_start', userId, socket.id, { criteria: data.criteria });
+          this.handleSearchStart(socket, data).then(() => {
+            const duration = Date.now() - startTime;
+            metricsCollector.messageProcessed(duration);
+            metricsCollector.searchCompleted(true);
+          }).catch(error => {
+            metricsCollector.errorOccurred(error as Error);
+            metricsCollector.searchCompleted(false);
+            wsLogger.error('search_start_handler_promise', userId, error as Error, { event: 'search:start' });
+          });
+        } catch (error) {
+            wsLogger.error('search_start_handler_sync', userId, error as Error, { event: 'search:start' });
+            socket.emit('error', { message: 'Critical error during search initiation.' });
+        }
       });
 
       socket.on('search:cancel', () => {
@@ -314,49 +319,50 @@ export class WebSocketManager {
         if (!this.userSockets.get(userId)?.size) {
           this.userSockets.delete(userId);
           
-          // Получаем статус активного поиска
-          SearchService.getUserActiveSearch(userId).then(activeSearch => {
-            if (activeSearch && activeSearch.status === 'searching') {
-              // Логируем информацию о потенциальной отмене поиска
-              wsLogger.info('search_disconnect_detected', 'Обнаружено отключение пользователя в поиске', {
-                userId,
-                searchId: activeSearch._id?.toString(),
-                disconnectReason: reason
-              });
-              
-              // Даем время на переподключение (10 секунд) прежде чем отменить поиск
-              const searchCancelTimeout = setTimeout(async () => {
-                // Проверяем, не переподключился ли пользователь за это время
-                if (!this.userSockets.has(userId)) {
-                  try {
-                    // Повторно проверяем, существует ли еще активный поиск
-                    const currentSearch = await SearchService.getUserActiveSearch(userId);
-                    if (currentSearch && currentSearch.status === 'searching') {
-                      wsLogger.info('search_auto_cancel', 'Автоматическая отмена поиска после таймаута', {
-                        userId,
-                        searchId: currentSearch._id?.toString(),
-                        disconnectReason: reason,
-                        disconnectDuration: Date.now() - connectionStart
-                      });
-                      
-                      await SearchService.cancelSearch(userId);
+          // При отключении пользователя не только отменяем поиск, но и завершаем активный чат
+          Promise.all([
+            // Логика отмены поиска
+            SearchService.getUserActiveSearch(userId).then(activeSearch => {
+              if (activeSearch && activeSearch.status === 'searching') {
+                wsLogger.info('search_disconnect_detected', 'Обнаружено отключение пользователя в поиске', {
+                  userId,
+                  searchId: activeSearch._id?.toString(),
+                  disconnectReason: reason
+                });
+                const searchCancelTimeout = setTimeout(async () => {
+                  if (!this.userSockets.has(userId)) {
+                    try {
+                      const currentSearch = await SearchService.getUserActiveSearch(userId);
+                      if (currentSearch && currentSearch.status === 'searching') {
+                        wsLogger.info('search_auto_cancel', 'Автоматическая отмена поиска после таймаута', {
+                          userId,
+                          searchId: currentSearch._id?.toString(),
+                          disconnectReason: reason,
+                          disconnectDuration: Date.now() - connectionStart
+                        });
+                        await SearchService.cancelSearch(userId);
+                      }
+                    } catch (error) {
+                      wsLogger.error('search_auto_cancel', userId, error as Error);
                     }
-                  } catch (error) {
-                    wsLogger.error('search_auto_cancel', userId, error as Error);
                   }
-                }
-              }, 10000); // 10 секунд на переподключение
-              
-              // Сохраняем таймаут в объект для возможности очистки при переподключении
-              pendingSearchCancellations.set(userId, searchCancelTimeout);
-            }
-          }).catch(error => {
-            wsLogger.error('get_active_search', userId, error as Error);
+                }, 10000);
+                pendingSearchCancellations.set(userId, searchCancelTimeout);
+              }
+            }).catch(error => {
+              wsLogger.error('get_active_search', userId, error as Error);
+            }),
+            // Новая логика завершения активного чата
+            ChatService.endChatOnDisconnect(userId).catch(error => {
+              wsLogger.error('end_chat_on_disconnect', userId, error as Error);
+            })
+          ]).catch(error => {
+            wsLogger.error('disconnect_promises_failed', userId, error as Error);
           });
           
           // Обновляем статус активности
           User.findByIdAndUpdate(userId, {
-            isActive: false,
+            isOnline: false,
             lastActive: new Date()
           }).then(() => {
             // Обновляем статистику после изменения статуса
@@ -439,68 +445,42 @@ export class WebSocketManager {
     }
   }
 
-  // Остальные обработчики будут реализованы позже
   private async handleSearchStart(socket: TypedSocket, data: { criteria: SearchCriteria }) {
     const userId = socket.data.user._id.toString();
-    try {
-      // Детальное логирование полученных критериев поиска, включая геолокацию
-      wsLogger.info('search_criteria_received', 'Получены критерии поиска', {
+    wsLogger.info('handle_search_start', `Handling search start for user ${userId}`, { userId });
+
+    // Проверяем Circuit Breaker
+    if (this.searchCircuitBreaker.getState() === 'OPEN') {
+      wsLogger.warn('circuit_open', `Search rejected for user ${userId} because circuit breaker is open`, {
         userId,
-        socketId: socket.id,
-        telegramId: socket.data.user.telegramId,
-        criteria: {
-          ...data.criteria,
-          // Логируем особенно геолокационные данные
-          useGeolocation: data.criteria.useGeolocation,
-          hasLocation: !!data.criteria.location,
-          location: data.criteria.location ? {
-            longitude: data.criteria.location.longitude,
-            latitude: data.criteria.location.latitude
-          } : null,
-          maxDistance: data.criteria.maxDistance
-        }
+        state: this.searchCircuitBreaker.getState()
       });
 
-      // Добавляем прямой вывод в консоль для отладки
-      console.log('📡 WEBSOCKET RECEIVED SEARCH:', {
-        userId, 
-        telegramId: socket.data.user.telegramId,
-        useGeolocation: data.criteria.useGeolocation,
-        hasLocation: !!data.criteria.location,
-        location: data.criteria.location,
-        criteria: data.criteria
+      this.sendToUser(userId, 'search:error', {
+        message: 'Search service is temporarily unavailable. Please try again later.'
       });
+      return;
+    }
 
-      await this.searchCircuitBreaker.execute(
-        async () => {
-          const telegramId = socket.data.user.telegramId;
-          socket.join(`search:${userId}`);
+    wsLogger.info('pre_search_service_call', `Circuit breaker is closed. Calling SearchService.startSearch for user ${userId}.`, { userId });
 
-          const search: SearchResult = await SearchService.startSearch(
-            userId,
-            telegramId,
-            data.criteria
-          );
-
-          if (search.status === 'searching') {
-            socket.emit('search:status', { status: 'searching' });
-          } else if (search.status === 'cancelled' || search.status === 'expired') {
-            socket.emit('search:expired');
-            socket.leave(`search:${userId}`);
-          }
-        },
-        async () => {
-          socket.emit('error', { 
-            message: 'Search service is temporarily unavailable. Please try again later.'
-          });
-          socket.leave(`search:${userId}`);
-        }
+    try {
+      const result = await SearchService.startSearch(
+        userId,
+        socket.data.user.telegramId,
+        data.criteria
       );
+
+      if (result.status === 'searching') {
+        socket.emit('search:status', { status: 'searching' });
+      } else if (result.status === 'cancelled' || result.status === 'expired') {
+        socket.emit('search:expired');
+      }
     } catch (error) {
-      socket.emit('error', {
-        message: error instanceof Error ? error.message : 'Failed to start search'
+      wsLogger.error('handle_search_start_error', userId, error as Error);
+      this.sendToUser(userId, 'search:error', {
+        message: error instanceof Error ? error.message : 'An unknown error occurred during search.'
       });
-      socket.leave(`search:${userId}`);
     }
   }
 
@@ -518,7 +498,7 @@ export class WebSocketManager {
         
         // Обновляем статус активности пользователя, чтобы убедиться что он остается активным
         User.findByIdAndUpdate(userId, {
-          isActive: true,
+          isOnline: true,
           lastActive: new Date()
         }).catch((error: unknown) => {
           wsLogger.error('update_activity_after_cancel', userId, error as Error);
