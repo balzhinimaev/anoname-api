@@ -10,8 +10,8 @@ class WebSocketTester {
   private socket: Socket<ServerToClientEvents, ClientToServerEvents>;
   private token: string;
   private userId: string;
-  private testChatId: string = '';
-  private testUserId2: string = '';
+  private testChatId = '';
+  private testUserId2 = '';
 
   constructor() {
     console.log('🔧 Инициализация Socket.IO клиента...');
@@ -59,8 +59,12 @@ class WebSocketTester {
       console.log('✅ Новое сообщение:', data);
     });
 
-    this.socket.on('chat:typing', (data) => {
+    this.socket.on('chat:start_typing', (data) => {
       console.log('✅ Печатает:', data);
+    });
+
+    this.socket.on('chat:stop_typing', (data) => {
+      console.log('✅ Перестал печатать:', data);
     });
 
     this.socket.on('chat:read', (data) => {
@@ -163,7 +167,8 @@ class WebSocketTester {
       this.testChatId = data.matchedUser.chatId;
     });
     this.socket.on('chat:message', (data) => console.log('✅ Новое сообщение:', data));
-    this.socket.on('chat:typing', (data) => console.log('✅ Печатает:', data));
+    this.socket.on('chat:start_typing', (data) => console.log('✅ Печатает:', data));
+    this.socket.on('chat:stop_typing', (data) => console.log('✅ Перестал печатать:', data));
     this.socket.on('chat:read', (data) => console.log('✅ Сообщения прочитаны:', data));
   }
 
@@ -244,7 +249,7 @@ class WebSocketTester {
     console.log('✅ Присоединились к чату:', this.testChatId);
 
     // Отправляем уведомление о наборе
-    this.socket.emit('chat:typing', this.testChatId);
+    this.socket.emit('chat:start_typing', { chatId: this.testChatId });
     console.log('✅ Отправлено уведомление о наборе');
 
     // Ждем немного
@@ -256,6 +261,16 @@ class WebSocketTester {
       content: 'Тестовое сообщение'
     });
     console.log('✅ Отправлено тестовое сообщение');
+
+    // Ждем немного (сервер должен автоматически послать stop_typing)
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    // Отправляем еще одно уведомление для теста stop_typing
+    this.socket.emit('chat:start_typing', { chatId: this.testChatId });
+    console.log('✅ Отправлено уведомление о наборе');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    this.socket.emit('chat:stop_typing', { chatId: this.testChatId });
+    console.log('✅ Отправлено уведомление о прекращении набора');
 
     // Ждем немного
     await new Promise(resolve => setTimeout(resolve, 1000));

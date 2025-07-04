@@ -464,10 +464,11 @@ export class SearchService {
     }
 
     // Получаем количество пользователей в поиске
-    const [totalSearching, maleSearching, femaleSearching] = await Promise.all([
+    const [totalSearching, maleSearching, femaleSearching, activeChatsCount] = await Promise.all([
       Search.countDocuments({ status: 'searching' }),
       Search.countDocuments({ status: 'searching', gender: 'male' }),
-      Search.countDocuments({ status: 'searching', gender: 'female' })
+      Search.countDocuments({ status: 'searching', gender: 'female' }),
+      Chat.countDocuments({ isActive: true }),
     ]);
 
     // Получаем общее количество активных пользователей онлайн
@@ -489,6 +490,7 @@ export class SearchService {
       t: totalSearching,
       m: maleSearching,
       f: femaleSearching,
+      inChat: activeChatsCount * 2, // Каждый активный чат имеет 2 участника
       online: {
         t: totalOnline,
         m: 0,
@@ -565,6 +567,9 @@ export class SearchService {
           } else if (action === 'match') {
             // При мэтче двое покидают поиск
             this.statsCache.data.t = Math.max(0, this.statsCache.data.t - 2);
+            
+            // Двое входят в чат
+            this.statsCache.data.inChat = (this.statsCache.data.inChat || 0) + 2;
             
             // Увеличиваем счетчик мэтчей
             this.statsCache.data.avgSearchTime.matches24h++;

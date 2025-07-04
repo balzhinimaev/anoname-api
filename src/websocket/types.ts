@@ -40,7 +40,11 @@ export interface ServerToClientEvents {
     chatId: string;
     message: IMessage;
   }) => void;
-  'chat:typing': (data: {
+  'chat:start_typing': (data: {
+    chatId: string;
+    userId: string;
+  }) => void;
+  'chat:stop_typing': (data: {
     chatId: string;
     userId: string;
   }) => void;
@@ -103,7 +107,8 @@ export interface ClientToServerEvents {
     chatId: string;
     content: string;
   }) => void;
-  'chat:typing': (chatId: string) => void;
+  'chat:start_typing': (data: { chatId: string }) => void;
+  'chat:stop_typing': (data: { chatId: string }) => void;
   'chat:read': (data: {
     chatId: string;
     timestamp: Date;

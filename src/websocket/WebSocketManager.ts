@@ -240,9 +240,14 @@ export class WebSocketManager {
         });
       });
 
-      socket.on('chat:typing', (chatId) => {
-        wsLogger.event('chat_typing', userId, socket.id, { chatId });
-        this.handleChatTyping(socket, chatId);
+      socket.on('chat:start_typing', (data) => {
+        wsLogger.event('chat_start_typing', userId, socket.id, { chatId: data.chatId });
+        this.handleChatStartTyping(socket, data.chatId);
+      });
+
+      socket.on('chat:stop_typing', (data) => {
+        wsLogger.event('chat_stop_typing', userId, socket.id, { chatId: data.chatId });
+        this.handleChatStopTyping(socket, data.chatId);
       });
 
       socket.on('chat:read', (data) => {
@@ -407,11 +412,21 @@ export class WebSocketManager {
     try {
       await this.chatCircuitBreaker.execute(
         async () => {
+          const userId = socket.data.user._id.toString();
           await ChatService.sendMessage(
             data.chatId,
-            socket.data.user._id.toString(),
+            userId,
             data.content
           );
+          // After sending message, broadcast stop_typing to others
+          socket.to(`chat:${data.chatId}`).emit('chat:stop_typing', {
+            chatId: data.chatId,
+            userId: userId,
+          });
+          wsLogger.info('auto_stop_typing', `Sent stop_typing for user ${userId} in chat ${data.chatId} after message`, {
+              chatId: data.chatId,
+              userId: userId
+          });
         },
         async () => {
           // Fallback: сохраняем сообщение локально и пытаемся отправить позже
@@ -426,10 +441,19 @@ export class WebSocketManager {
     }
   }
 
-  private async handleChatTyping(socket: TypedSocket, chatId: string) {
-    socket.to(`chat:${chatId}`).emit('chat:typing', {
+  private async handleChatStartTyping(socket: TypedSocket, chatId: string) {
+    const userId = socket.data.user._id.toString();
+    socket.to(`chat:${chatId}`).emit('chat:start_typing', {
       chatId,
-      userId: socket.data.user.telegramId
+      userId: userId,
+    });
+  }
+
+  private async handleChatStopTyping(socket: TypedSocket, chatId: string) {
+    const userId = socket.data.user._id.toString();
+    socket.to(`chat:${chatId}`).emit('chat:stop_typing', {
+      chatId,
+      userId: userId,
     });
   }
 

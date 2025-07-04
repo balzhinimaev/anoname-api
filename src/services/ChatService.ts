@@ -3,6 +3,7 @@ import Message, { IMessage } from '../models/Message';
 import { wsManager } from '../server';
 import mongoose from 'mongoose';
 import { wsLogger } from '../utils/logger';
+import { SearchService } from './SearchService';
 
 export class ChatService {
   static async sendMessage(
@@ -109,6 +110,11 @@ export class ChatService {
     wsLogger.info('chat_ended', `Chat ${chatId} ended by user ${userId}`, {
       reason,
     });
+
+    // Обновляем глобальную статистику
+    SearchService.broadcastSearchStats().catch(err => {
+      wsLogger.warn('broadcast_stats_error', 'Failed to broadcast stats after ending chat', { error: (err as Error).message, chatId });
+    });
   }
 
   static async endChatOnDisconnect(userId: string): Promise<void> {
@@ -141,6 +147,11 @@ export class ChatService {
         `Chat ${chatId} ended due to user ${userId} disconnect`,
         { reason }
       );
+      
+      // Обновляем глобальную статистику
+      SearchService.broadcastSearchStats().catch(err => {
+        wsLogger.warn('broadcast_stats_error', 'Failed to broadcast stats after auto-ending chat', { error: (err as Error).message, chatId });
+      });
     }
   }
 } 
