@@ -7,6 +7,7 @@ export interface IMessage extends Document {
   timestamp: Date;
   isRead: boolean;
   readBy: mongoose.Schema.Types.ObjectId[];
+  replyTo?: mongoose.Schema.Types.ObjectId;  // ID сообщения, на которое отвечаем
 }
 
 const MessageSchema: Schema = new Schema({
@@ -38,7 +39,12 @@ const MessageSchema: Schema = new Schema({
   readBy: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
-  }]
+  }],
+  replyTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Message',
+    required: false,
+  }
 });
 
 export default mongoose.model<IMessage>('Message', MessageSchema); 

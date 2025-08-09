@@ -40,7 +40,11 @@ export interface ServerToClientEvents {
     chatId: string;
     message: IMessage;
   }) => void;
-  'chat:typing': (data: {
+  'chat:start_typing': (data: {
+    chatId: string;
+    userId: string;
+  }) => void;
+  'chat:stop_typing': (data: {
     chatId: string;
     userId: string;
   }) => void;
@@ -58,6 +62,11 @@ export interface ServerToClientEvents {
     chatId: string;
     ratedBy: string;
     score: number;
+  }) => void;
+  'chat:partner_status': (data: {
+    chatId: string;
+    userId: string;
+    status: 'online' | 'offline';
   }) => void;
 
   // Контакты
@@ -102,8 +111,10 @@ export interface ClientToServerEvents {
   'chat:message': (data: {
     chatId: string;
     content: string;
+    replyTo?: string;  // ID сообщения, на которое отвечаем
   }) => void;
-  'chat:typing': (chatId: string) => void;
+  'chat:start_typing': (data: { chatId: string }) => void;
+  'chat:stop_typing': (data: { chatId: string }) => void;
   'chat:read': (data: {
     chatId: string;
     timestamp: Date;

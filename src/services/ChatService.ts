@@ -3,12 +3,14 @@ import Message, { IMessage } from '../models/Message';
 import { wsManager } from '../server';
 import mongoose from 'mongoose';
 import { wsLogger } from '../utils/logger';
+import { SearchService } from './SearchService';
 
 export class ChatService {
   static async sendMessage(
     chatId: string,
     userId: string,
-    content: string
+    content: string,
+    replyTo?: string
   ): Promise<IMessage> {
     const chat = await Chat.findById(chatId);
     if (!chat) {
@@ -19,24 +21,48 @@ export class ChatService {
       throw new Error('User is not a participant of this chat');
     }
 
-    // 1. Создаем сообщение как отдельный документ
+    // 1. Проверяем, если это ответ на сообщение
+    if (replyTo) {
+      const replyMessage = await Message.findById(replyTo);
+      if (!replyMessage) {
+        throw new Error('Reply message not found');
+      }
+      
+      // Проверяем, что оригинальное сообщение из того же чата
+      if (replyMessage.chatId.toString() !== chatId) {
+        throw new Error('Reply message is not from the same chat');
+      }
+    }
+
+    // 2. Создаем сообщение как отдельный документ
     const message = await Message.create({
       chatId: new mongoose.Types.ObjectId(chatId),
       sender: new mongoose.Types.ObjectId(userId),
       content,
+      replyTo: replyTo ? new mongoose.Types.ObjectId(replyTo) : undefined,
     });
 
-    // 2. Обновляем lastMessage в чате
+    // 3. Обновляем lastMessage в чате
     chat.lastMessage = message._id as mongoose.Types.ObjectId;
     await chat.save();
     
-    // 3. Загружаем информацию об отправителе для отправки клиенту
-    const messageWithSender = await message.populate(
-      'sender',
-      'telegramId username firstName lastName photos'
-    );
+    // 4. Загружаем информацию об отправителе и сообщении-ответе для отправки клиенту
+    const messageWithSender = await message.populate([
+      {
+        path: 'sender',
+        select: 'telegramId username firstName lastName photos'
+      },
+      {
+        path: 'replyTo',
+        select: 'content sender timestamp',
+        populate: {
+          path: 'sender',
+          select: 'telegramId username firstName lastName'
+        }
+      }
+    ]);
 
-    // 4. Отправляем полный объект сообщения всем участникам чата
+    // 5. Отправляем полный объект сообщения всем участникам чата
     wsManager.io.to(`chat:${chatId}`).emit('chat:message', {
       chatId,
       message: messageWithSender,
@@ -109,38 +135,10 @@ export class ChatService {
     wsLogger.info('chat_ended', `Chat ${chatId} ended by user ${userId}`, {
       reason,
     });
-  }
 
-  static async endChatOnDisconnect(userId: string): Promise<void> {
-    // Находим активный чат, в котором участвовал отключившийся пользователь
-    const activeChat = await Chat.findOne({
-      participants: new mongoose.Types.ObjectId(userId),
-      isActive: true,
+    // Обновляем глобальную статистику
+    SearchService.broadcastSearchStats().catch(err => {
+      wsLogger.warn('broadcast_stats_error', 'Failed to broadcast stats after ending chat', { error: (err as Error).message, chatId });
     });
-
-    if (activeChat) {
-      const chatId = activeChat._id.toString();
-      const reason = 'partner_disconnected';
-
-      // Завершаем чат
-      activeChat.isActive = false;
-      activeChat.endedAt = new Date();
-      activeChat.endedBy = new mongoose.Types.ObjectId(userId);
-      activeChat.endReason = reason;
-      await activeChat.save();
-
-      // Уведомляем всех участников (т.е. оставшегося партнера) о завершении чата
-      wsManager.io.to(`chat:${chatId}`).emit('chat:ended', {
-        chatId,
-        endedBy: userId,
-        reason,
-      });
-
-      wsLogger.info(
-        'chat_auto_ended_disconnect',
-        `Chat ${chatId} ended due to user ${userId} disconnect`,
-        { reason }
-      );
-    }
   }
 } 

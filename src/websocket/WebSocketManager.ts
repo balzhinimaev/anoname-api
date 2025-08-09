@@ -9,9 +9,12 @@ import { metricsCollector } from '../utils/metrics';
 import { CircuitBreaker } from '../utils/CircuitBreaker';
 import User from '../models/User';
 import { RatingService } from '../services/RatingService';
+import Chat from '../models/Chat';
+import mongoose from 'mongoose';
 
 // Создаем статическую карту для хранения таймаутов
 const pendingSearchCancellations = new Map<string, NodeJS.Timeout>();
+const pendingChatEndTimers: Map<string, NodeJS.Timeout> = new Map(); // chatId -> timer
 
 export class WebSocketManager {
   public io: Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
@@ -155,24 +158,9 @@ export class WebSocketManager {
         this.userRooms.set(userId, new Set());
       }
 
-      // При переподключении восстанавливаем комнаты
+      // При переподключении восстанавливаем комнаты и отменяем таймеры
       if (isReconnection) {
-        const rooms = this.userRooms.get(userId);
-        if (rooms) {
-          rooms.forEach(room => {
-            socket.join(room);
-            wsLogger.event('room_rejoin', userId, socket.id, { room });
-          });
-        }
-        
-        // Очищаем таймер отмены поиска, если пользователь переподключился
-        const cancelTimeout = pendingSearchCancellations.get(userId);
-        if (cancelTimeout) {
-          clearTimeout(cancelTimeout);
-          pendingSearchCancellations.delete(userId);
-        }
-        
-        socket.emit('connection:recovered');
+        this.handleReconnection(socket);
       }
 
       // Обработчики поиска с логированием
@@ -240,9 +228,14 @@ export class WebSocketManager {
         });
       });
 
-      socket.on('chat:typing', (chatId) => {
-        wsLogger.event('chat_typing', userId, socket.id, { chatId });
-        this.handleChatTyping(socket, chatId);
+      socket.on('chat:start_typing', (data) => {
+        wsLogger.event('chat_start_typing', userId, socket.id, { chatId: data.chatId });
+        this.handleChatStartTyping(socket, data.chatId);
+      });
+
+      socket.on('chat:stop_typing', (data) => {
+        wsLogger.event('chat_stop_typing', userId, socket.id, { chatId: data.chatId });
+        this.handleChatStopTyping(socket, data.chatId);
       });
 
       socket.on('chat:read', (data) => {
@@ -319,66 +312,7 @@ export class WebSocketManager {
         if (!this.userSockets.get(userId)?.size) {
           this.userSockets.delete(userId);
           
-          // При отключении пользователя не только отменяем поиск, но и завершаем активный чат
-          Promise.all([
-            // Логика отмены поиска
-            SearchService.getUserActiveSearch(userId).then(activeSearch => {
-              if (activeSearch && activeSearch.status === 'searching') {
-                wsLogger.info('search_disconnect_detected', 'Обнаружено отключение пользователя в поиске', {
-                  userId,
-                  searchId: activeSearch._id?.toString(),
-                  disconnectReason: reason
-                });
-                const searchCancelTimeout = setTimeout(async () => {
-                  if (!this.userSockets.has(userId)) {
-                    try {
-                      const currentSearch = await SearchService.getUserActiveSearch(userId);
-                      if (currentSearch && currentSearch.status === 'searching') {
-                        wsLogger.info('search_auto_cancel', 'Автоматическая отмена поиска после таймаута', {
-                          userId,
-                          searchId: currentSearch._id?.toString(),
-                          disconnectReason: reason,
-                          disconnectDuration: Date.now() - connectionStart
-                        });
-                        await SearchService.cancelSearch(userId);
-                      }
-                    } catch (error) {
-                      wsLogger.error('search_auto_cancel', userId, error as Error);
-                    }
-                  }
-                }, 10000);
-                pendingSearchCancellations.set(userId, searchCancelTimeout);
-              }
-            }).catch(error => {
-              wsLogger.error('get_active_search', userId, error as Error);
-            }),
-            // Новая логика завершения активного чата
-            ChatService.endChatOnDisconnect(userId).catch(error => {
-              wsLogger.error('end_chat_on_disconnect', userId, error as Error);
-            })
-          ]).catch(error => {
-            wsLogger.error('disconnect_promises_failed', userId, error as Error);
-          });
-          
-          // Обновляем статус активности
-          User.findByIdAndUpdate(userId, {
-            isOnline: false,
-            lastActive: new Date()
-          }).then(() => {
-            // Обновляем статистику после изменения статуса
-            SearchService.broadcastSearchStats().catch((error: unknown) => {
-              wsLogger.error('update_stats_on_disconnect', userId, error as Error);
-            });
-          }).catch((error: unknown) => {
-            wsLogger.error('update_activity', userId, error as Error);
-          });
-          
-          // При полном отключении сохраняем состояние на 2 минуты
-          setTimeout(() => {
-            if (!this.userSockets.has(userId)) {
-              this.userRooms.delete(userId);
-            }
-          }, 2 * 60 * 1000);
+          this.handleFullDisconnect(userId, reason, duration);
         }
 
         wsLogger.disconnection(userId, socket.id, reason, {
@@ -387,6 +321,135 @@ export class WebSocketManager {
         });
       });
     });
+  }
+
+  private async handleReconnection(socket: TypedSocket) {
+    const userId = socket.data.user._id.toString();
+
+    // Восстанавливаем комнаты
+    const rooms = this.userRooms.get(userId);
+    if (rooms) {
+      rooms.forEach(room => {
+        socket.join(room);
+        wsLogger.event('room_rejoin', userId, socket.id, { room });
+      });
+    }
+
+    // Очищаем таймер отмены поиска, если пользователь переподключился
+    const cancelTimeout = pendingSearchCancellations.get(userId);
+    if (cancelTimeout) {
+      clearTimeout(cancelTimeout);
+      pendingSearchCancellations.delete(userId);
+      wsLogger.info('search_cancel_timer_cleared', `Cleared search cancellation timer for user ${userId}`, { userId });
+    }
+
+    // Проверяем, был ли пользователь в чате, и отменяем его завершение
+    try {
+      const activeChat = await Chat.findOne({ participants: new mongoose.Types.ObjectId(userId), isActive: true });
+      if (activeChat) {
+        const chatId = activeChat._id.toString();
+        const endTimer = pendingChatEndTimers.get(chatId);
+        if (endTimer) {
+          clearTimeout(endTimer);
+          pendingChatEndTimers.delete(chatId);
+          wsLogger.info('chat_end_timer_cleared', `Cleared chat end timer for user ${userId} in chat ${chatId}`, { userId, chatId });
+          
+          // Уведомляем другого участника, что пользователь вернулся
+          const otherParticipant = activeChat.participants.find(p => p.toString() !== userId);
+          if (otherParticipant) {
+            this.sendToUser(otherParticipant.toString(), 'chat:partner_status', {
+              chatId,
+              userId,
+              status: 'online'
+            });
+          }
+        }
+      }
+    } catch (error) {
+      wsLogger.error('reconnection_chat_check', userId, error as Error);
+    }
+    
+    socket.emit('connection:recovered');
+  }
+
+  private async handleFullDisconnect(userId: string, reason: string, duration: number) {
+    // Логика отмены поиска
+    SearchService.getUserActiveSearch(userId).then(activeSearch => {
+      if (activeSearch && activeSearch.status === 'searching') {
+        wsLogger.info('search_disconnect_detected', 'User in search disconnected', { userId, searchId: activeSearch._id?.toString(), reason, duration });
+        const searchCancelTimeout = setTimeout(async () => {
+          if (!this.userSockets.has(userId)) {
+            try {
+              const currentSearch = await SearchService.getUserActiveSearch(userId);
+              if (currentSearch && currentSearch.status === 'searching') {
+                await SearchService.cancelSearch(userId);
+                wsLogger.info('search_auto_cancelled', 'Search automatically cancelled after timeout', { userId, searchId: currentSearch._id?.toString() });
+              }
+            } catch (error) {
+              wsLogger.error('search_auto_cancel_error', userId, error as Error);
+            }
+          }
+        }, 10000); // Таймаут 10 сек для отмены поиска
+        pendingSearchCancellations.set(userId, searchCancelTimeout);
+      }
+    }).catch(error => {
+      wsLogger.error('get_active_search_error', userId, error as Error);
+    });
+
+    // Новая логика завершения активного чата с таймаутом
+    Chat.findOne({ participants: new mongoose.Types.ObjectId(userId), isActive: true }).then(activeChat => {
+      if (activeChat) {
+        const chatId = activeChat._id.toString();
+        const otherParticipantId = activeChat.participants.find(p => p.toString() !== userId)?.toString();
+        
+        if (otherParticipantId) {
+          // Уведомляем другого участника, что партнер отключился
+          this.sendToUser(otherParticipantId, 'chat:partner_status', {
+            chatId,
+            userId,
+            status: 'offline'
+          });
+          
+          wsLogger.info('chat_disconnect_detected', `User ${userId} disconnected from active chat ${chatId}. Starting 30s end timer.`, { userId, chatId, otherParticipantId });
+
+          const chatEndTimeout = setTimeout(async () => {
+            // Проверяем, не переподключился ли пользователь
+            if (!this.userSockets.has(userId)) {
+              wsLogger.info('chat_end_timer_fired', `Ending chat ${chatId} as user ${userId} did not reconnect in time.`, { userId, chatId });
+              try {
+                await ChatService.endChat(chatId, userId, 'partner_disconnected');
+              } catch (error) {
+                wsLogger.error('chat_end_on_timeout_error', userId, error as Error, { chatId });
+              }
+            }
+            pendingChatEndTimers.delete(chatId);
+          }, 30000); // 30-секундный льготный период
+
+          pendingChatEndTimers.set(chatId, chatEndTimeout);
+        }
+      }
+    }).catch(error => {
+      wsLogger.error('find_active_chat_on_disconnect_error', userId, error as Error);
+    });
+    
+    // Обновляем статус активности
+    User.findByIdAndUpdate(userId, {
+      isOnline: false,
+      lastActive: new Date()
+    }).then(() => {
+      SearchService.broadcastSearchStats().catch((error: unknown) => {
+        wsLogger.error('update_stats_on_disconnect', userId, error as Error);
+      });
+    }).catch((error: unknown) => {
+      wsLogger.error('update_activity_on_disconnect', userId, error as Error);
+    });
+    
+    // При полном отключении сохраняем состояние на 2 минуты
+    setTimeout(() => {
+      if (!this.userSockets.has(userId)) {
+        this.userRooms.delete(userId);
+      }
+    }, 2 * 60 * 1000);
   }
 
   // Методы для отправки событий конкретному пользователю
@@ -403,15 +466,26 @@ export class WebSocketManager {
     }
   }
 
-  private async handleChatMessage(socket: TypedSocket, data: { chatId: string; content: string }) {
+  private async handleChatMessage(socket: TypedSocket, data: { chatId: string; content: string; replyTo?: string }) {
     try {
       await this.chatCircuitBreaker.execute(
         async () => {
+          const userId = socket.data.user._id.toString();
           await ChatService.sendMessage(
             data.chatId,
-            socket.data.user._id.toString(),
-            data.content
+            userId,
+            data.content,
+            data.replyTo
           );
+          // After sending message, broadcast stop_typing to others
+          socket.to(`chat:${data.chatId}`).emit('chat:stop_typing', {
+            chatId: data.chatId,
+            userId: userId,
+          });
+          wsLogger.info('auto_stop_typing', `Sent stop_typing for user ${userId} in chat ${data.chatId} after message`, {
+              chatId: data.chatId,
+              userId: userId
+          });
         },
         async () => {
           // Fallback: сохраняем сообщение локально и пытаемся отправить позже
@@ -426,10 +500,19 @@ export class WebSocketManager {
     }
   }
 
-  private async handleChatTyping(socket: TypedSocket, chatId: string) {
-    socket.to(`chat:${chatId}`).emit('chat:typing', {
+  private async handleChatStartTyping(socket: TypedSocket, chatId: string) {
+    const userId = socket.data.user._id.toString();
+    socket.to(`chat:${chatId}`).emit('chat:start_typing', {
       chatId,
-      userId: socket.data.user.telegramId
+      userId: userId,
+    });
+  }
+
+  private async handleChatStopTyping(socket: TypedSocket, chatId: string) {
+    const userId = socket.data.user._id.toString();
+    socket.to(`chat:${chatId}`).emit('chat:stop_typing', {
+      chatId,
+      userId: userId,
     });
   }
 

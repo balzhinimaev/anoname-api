@@ -12,8 +12,9 @@ export const socketAuth = async (
 ) => {
   try {
     wsLogger.info('auth_attempt', 'WebSocket authentication attempt', {
-      headers: socket.handshake.headers,
-      auth: socket.handshake.auth
+      origin: socket.handshake.headers?.origin,
+      userAgent: (socket.handshake.headers as any)['user-agent'],
+      hasAuthToken: Boolean((socket.handshake as any).auth?.token || (socket.handshake.headers as any).token || (socket.handshake.headers as any).authorization)
     });
 
     // Пытаемся получить токен из разных источников
@@ -28,8 +29,9 @@ export const socketAuth = async (
     
     if (!token) {
       wsLogger.error('system', 'socket-auth', new Error('Token not provided'), {
-        headers: socket.handshake.headers,
-        auth: socket.handshake.auth
+        reason: 'no_token_provided',
+        origin: socket.handshake.headers?.origin,
+        userAgent: (socket.handshake.headers as any)['user-agent']
       });
       return next(new Error('Authentication error: Token not provided'));
     }
@@ -48,8 +50,7 @@ export const socketAuth = async (
     if (!user) {
       wsLogger.error('system', 'socket-auth', new Error('User not found'), {
         userId: decoded.userId,
-        telegramId: decoded.telegramId,
-        token: token.substring(0, 10) + '...'
+        telegramId: decoded.telegramId
       });
       return next(new Error('Authentication error: User not found'));
     }
@@ -79,8 +80,8 @@ export const socketAuth = async (
     next();
   } catch (error) {
     wsLogger.error('system', 'socket-auth', error as Error, {
-      headers: socket.handshake.headers,
-      auth: socket.handshake.auth
+      origin: socket.handshake.headers?.origin,
+      userAgent: (socket.handshake.headers as any)['user-agent']
     });
     next(new Error('Authentication error: Invalid token'));
   }

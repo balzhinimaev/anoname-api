@@ -67,12 +67,8 @@ export interface IUser extends Document {
   
   /** Виртуальная валюта пользователя */
   currency?: {
-    /** Количество "сердечек" */
-    hearts: number;
     /** Количество "буостов" */
     boosts: number;
-    /** Количество "супер-лайков" */
-    superLikes: number;
     /** Последнее пополнение бесплатной валюты */
     lastFreeRefill: Date;
   };
@@ -142,9 +138,7 @@ const UserSchema: Schema = new Schema({
   },
   
   currency: {
-    hearts: { type: Number, default: 10 }, // Бесплатно 10 в день
     boosts: { type: Number, default: 0 },
-    superLikes: { type: Number, default: 1 }, // 1 бесплатный супер-лайк
     lastFreeRefill: { type: Date, default: Date.now }
   },
   

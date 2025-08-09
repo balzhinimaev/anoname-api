@@ -519,20 +519,15 @@ photos: [File, File, ...] // Максимум 5 файлов
       "expiresAt": "2024-01-06T12:00:00.000Z",
       "features": {
         "unlimitedSearches": true,
-        "maxSearchDistance": 100,
+        
         "advancedFilters": true,
         "priorityInSearch": true,
-        "dailyHearts": 50,
-        "dailySuperLikes": 5,
-        "canSeeWhoLiked": true,
-        "analytics": true,
-        "videoChat": false
+        
+        "analytics": true
       }
     },
     "currency": {
-      "hearts": 25,
-      "boosts": 3,
-      "superLikes": 5
+    "boosts": 3
     },
     "limits": {
       "searchesToday": 2,
@@ -566,48 +561,27 @@ photos: [File, File, ...] // Максимум 5 файлов
       "duration": 0,
       "features": {
         "unlimitedSearches": false,
-        "maxSearchDistance": 10,
+        
         "advancedFilters": false,
         "priorityInSearch": false,
-        "dailyHearts": 10,
-        "dailySuperLikes": 1,
-        "canSeeWhoLiked": false,
-        "analytics": false,
-        "videoChat": false
+        
+        "analytics": false
       }
     },
     "premium": {
       "type": "premium",
-      "price": 299,
+      "price": 199,
       "duration": 30,
       "features": {
         "unlimitedSearches": true,
-        "maxSearchDistance": 100,
+        
         "advancedFilters": true,
         "priorityInSearch": true,
-        "dailyHearts": 50,
-        "dailySuperLikes": 5,
-        "canSeeWhoLiked": true,
-        "analytics": true,
-        "videoChat": false
+        
+        "analytics": true
       }
     },
-    "gold": {
-      "type": "gold",
-      "price": 499,
-      "duration": 30,
-      "features": {
-        "unlimitedSearches": true,
-        "maxSearchDistance": 500,
-        "advancedFilters": true,
-        "priorityInSearch": true,
-        "dailyHearts": 100,
-        "dailySuperLikes": 10,
-        "canSeeWhoLiked": true,
-        "analytics": true,
-        "videoChat": true
-      }
-    }
+    
   }
 }
 ```
@@ -624,15 +598,9 @@ photos: [File, File, ...] // Максимум 5 файлов
 {
   "success": true,
   "data": {
-    "hearts_10": { "type": "hearts", "amount": 10, "price": 59 },
-    "hearts_50": { "type": "hearts", "amount": 50, "price": 199 },
-    "hearts_100": { "type": "hearts", "amount": 100, "price": 349 },
     "boosts_1": { "type": "boosts", "amount": 1, "price": 99 },
     "boosts_5": { "type": "boosts", "amount": 5, "price": 399 },
-    "superLikes_3": { "type": "superLikes", "amount": 3, "price": 149 },
-    "superLikes_10": { "type": "superLikes", "amount": 10, "price": 399 },
-    "premium": { "type": "subscription", "subscriptionType": "premium", "price": 299 },
-    "gold": { "type": "subscription", "subscriptionType": "gold", "price": 499 }
+    "premium": { "type": "subscription", "subscriptionType": "premium", "price": 199 }
   }
 }
 ```
@@ -647,7 +615,7 @@ photos: [File, File, ...] // Максимум 5 файлов
 **Тело запроса:**
 ```json
 {
-  "itemKey": "hearts_10",
+  "itemKey": "premium",
   "paymentData": {
     "payment_id": "12345",
     "amount": 59,
@@ -657,11 +625,21 @@ photos: [File, File, ...] // Максимум 5 файлов
 }
 ```
 
-**Успешный ответ (200):**
+**Успешный ответ (200), если требуется подтверждение:**
 ```json
 {
   "success": true,
-  "message": "Покупка успешно завершена"
+  "redirectUrl": "https://yookassa.ru/pay/confirmation-url",
+  "paymentId": "2a2f51a0-000f-5000-9000-1abc2def3456",
+  "message": "Перейдите по ссылке для оплаты"
+}
+```
+
+**Успешный ответ (200), если платёж сразу прошёл:**
+```json
+{
+  "success": true,
+  "message": "Подписка premium активирована!"
 }
 ```
 
@@ -669,6 +647,28 @@ photos: [File, File, ...] // Максимум 5 файлов
 - `400` - Товар не найден или ошибка валидации
 - `402` - Ошибка платежа
 - `500` - Внутренняя ошибка сервера
+
+---
+
+### `POST /api/monetization/webhook/yookassa`
+Вебхук от YooKassa
+
+**Тело запроса (пример):**
+```json
+{
+  "event": "payment.succeeded",
+  "object": {
+    "id": "2a2f51a0-000f-5000-9000-1abc2def3456",
+    "status": "succeeded",
+    "paid": true,
+    "metadata": { "userId": "656f176ff4e322b83fb8828d", "itemKey": "premium" }
+  }
+}
+```
+
+**Ответы:**
+- 200: `{ "success": true, "message": "Payment confirmed" }`
+- 400: `{ "success": false, "error": "Payment not confirmed" }`
 
 ---
 
@@ -740,40 +740,11 @@ photos: [File, File, ...] // Максимум 5 файлов
 
 ---
 
-### `GET /api/monetization/check/superlike`
-Проверка возможности использования супер-лайка
-
-**Заголовки:** `Authorization: Bearer <token>`
-
-**Успешный ответ (200):**
-```json
-{
-  "success": true,
-  "data": {
-    "canUse": true,
-    "available": 5
-  }
-}
-```
+ 
 
 ---
 
-### `POST /api/monetization/refill`
-Пополнение бесплатной валюты
-
-**Заголовки:** `Authorization: Bearer <token>`
-
-**Успешный ответ (200):**
-```json
-{
-  "success": true,
-  "message": "Бесплатная валюта пополнена",
-  "added": {
-    "hearts": 5,
-    "superLikes": 1
-  }
-}
-```
+ 
 
 ---
 
