@@ -39,20 +39,16 @@
 ## 🪙 Виртуальная валюта
 
 ### Типы валюты:
-- **❤️ Лайки (Hearts)** - для оценки профилей
+- Удалены лайки (Hearts) и супер-лайки как неиспользуемые в UI
 - **🚀 Буосты (Boosts)** - продвижение профиля в топ
 - **⭐ Супер-лайки** - гарантированный показ профиля
 
 ### Пакеты покупок:
 ```javascript
 const PURCHASE_ITEMS = {
-  hearts_10: { amount: 10, price: 59 },
-  hearts_50: { amount: 50, price: 199 },
-  hearts_100: { amount: 100, price: 349 },
   boosts_1: { amount: 1, price: 99 },
   boosts_5: { amount: 5, price: 399 },
-  superLikes_3: { amount: 3, price: 149 },
-  superLikes_10: { amount: 10, price: 399 }
+  
 };
 ```
 
@@ -70,7 +66,7 @@ POST /api/monetization/purchase
 Content-Type: application/json
 
 {
-  "itemKey": "hearts_10",
+  "itemKey": "boosts_1",
   "paymentData": {
     "payment_id": "12345",
     "amount": 59
@@ -82,7 +78,7 @@ Content-Type: application/json
 ```http
 GET /api/monetization/check/search
 GET /api/monetization/check/boost
-GET /api/monetization/check/superlike
+Удалён эндпоинт: GET /api/monetization/check/superlike
 ```
 
 ## 📈 Прогнозы доходности

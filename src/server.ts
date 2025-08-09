@@ -38,7 +38,12 @@ const port = process.env.PORT || 3001;
 //   allowedHeaders: ['Content-Type', 'Authorization'],
 //   credentials: true
 // }));
-app.use(express.json());
+// Парсим JSON и одновременно сохраняем сырой буфер тела запроса для проверки сигнатур вебхуков
+app.use(express.json({
+  verify: (req: any, _res, buf) => {
+    req.rawBody = Buffer.from(buf);
+  }
+}));
 
 /**
  * Инициализация Swagger UI
@@ -70,7 +75,8 @@ app.get('/health', (_req, res) => {
 app.use('/api/users', authMiddleware, userRouter);
 app.use('/api/chats', authMiddleware, chatRouter);
 app.use('/api/search', searchRouter);
-app.use('/api/monetization', authMiddleware, monetizationRouter);
+// Маршруты монетизации: вебхук должен быть публичным, остальные защищаем внутри самого роутера
+app.use('/api/monetization', monetizationRouter);
 
 // Error handling middleware
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

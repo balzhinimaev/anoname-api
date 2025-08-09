@@ -63,6 +63,11 @@ export interface ServerToClientEvents {
     ratedBy: string;
     score: number;
   }) => void;
+  'chat:partner_status': (data: {
+    chatId: string;
+    userId: string;
+    status: 'online' | 'offline';
+  }) => void;
 
   // Контакты
   'contact:request': (data: {
@@ -106,6 +111,7 @@ export interface ClientToServerEvents {
   'chat:message': (data: {
     chatId: string;
     content: string;
+    replyTo?: string;  // ID сообщения, на которое отвечаем
   }) => void;
   'chat:start_typing': (data: { chatId: string }) => void;
   'chat:stop_typing': (data: { chatId: string }) => void;

@@ -1,7 +1,17 @@
 import winston from 'winston';
 import path from 'path';
+import fs from 'fs';
 
-const logDir = 'logs';
+const logDir = path.resolve(process.cwd(), 'logs');
+
+// Гарантируем существование директории логов
+try {
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
+} catch {
+  // игнорируем ошибку создания каталога, консольный транспорт всё равно будет работать ниже
+}
 const { combine, timestamp, printf, colorize } = winston.format;
 
 // Формат для консоли

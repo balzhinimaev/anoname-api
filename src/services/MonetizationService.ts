@@ -5,21 +5,20 @@
 
 import User, { IUser } from '../models/User';
 import { wsLogger } from '../utils/logger';
+import config from '../config';
+import crypto from 'crypto';
+import mongoose from 'mongoose';
+import PaymentLog from '../models/Payment';
 
 export interface SubscriptionTier {
-  type: 'basic' | 'premium' | 'gold';
+  type: 'basic' | 'premium';
   price: number;
   duration: number; // дни
   features: {
     unlimitedSearches: boolean;
-    maxSearchDistance: number;
     advancedFilters: boolean;
     priorityInSearch: boolean;
-    dailyHearts: number;
-    dailySuperLikes: number;
-    canSeeWhoLiked: boolean;
     analytics: boolean;
-    videoChat: boolean;
   };
 }
 
@@ -30,88 +29,86 @@ export const SUBSCRIPTION_TIERS: Record<string, SubscriptionTier> = {
     duration: 0,
     features: {
       unlimitedSearches: false,
-      maxSearchDistance: 10,
       advancedFilters: false,
       priorityInSearch: false,
-      dailyHearts: 10,
-      dailySuperLikes: 1,
-      canSeeWhoLiked: false,
-      analytics: false,
-      videoChat: false
+      analytics: false
     }
   },
   premium: {
     type: 'premium',
-    price: 299, // рублей/месяц
+    price: 10, // рублей/месяц
     duration: 30,
     features: {
       unlimitedSearches: true,
-      maxSearchDistance: 100,
       advancedFilters: true,
       priorityInSearch: true,
-      dailyHearts: 50,
-      dailySuperLikes: 5,
-      canSeeWhoLiked: true,
-      analytics: true,
-      videoChat: false
+      analytics: true
     }
   },
-  gold: {
-    type: 'gold',
-    price: 499, // рублей/месяц
-    duration: 30,
-    features: {
-      unlimitedSearches: true,
-      maxSearchDistance: 500,
-      advancedFilters: true,
-      priorityInSearch: true,
-      dailyHearts: 100,
-      dailySuperLikes: 10,
-      canSeeWhoLiked: true,
-      analytics: true,
-      videoChat: true
-    }
-  }
+  // Удалён тариф gold — оставлен один платный тариф premium
 };
 
 export interface PurchaseItem {
-  type: 'hearts' | 'boosts' | 'superLikes' | 'subscription';
+  type: 'boosts' | 'subscription';
   amount?: number;
   subscriptionType?: 'premium' | 'gold';
   price: number;
 }
 
 export const PURCHASE_ITEMS: Record<string, PurchaseItem> = {
-  hearts_10: { type: 'hearts', amount: 10, price: 59 },
-  hearts_50: { type: 'hearts', amount: 50, price: 199 },
-  hearts_100: { type: 'hearts', amount: 100, price: 349 },
   boosts_1: { type: 'boosts', amount: 1, price: 99 },
   boosts_5: { type: 'boosts', amount: 5, price: 399 },
-  superLikes_3: { type: 'superLikes', amount: 3, price: 149 },
-  superLikes_10: { type: 'superLikes', amount: 10, price: 399 },
-  premium: { type: 'subscription', subscriptionType: 'premium', price: 299 },
-  gold: { type: 'subscription', subscriptionType: 'gold', price: 499 }
+  premium: { type: 'subscription', subscriptionType: 'premium', price: 10 }
 };
 
 export class MonetizationService {
+  private static toSafeSubscription(sub: IUser['subscription'] | undefined) {
+    return {
+      type: (sub && sub.type) || 'basic',
+      startDate: sub?.startDate,
+      endDate: sub?.endDate,
+      isActive: !!(sub && sub.isActive),
+      autoRenew: !!(sub && sub.autoRenew)
+    };
+  }
+  /**
+   * Проверяет срок действия подписки и деактивирует её при истечении.
+   * Возвращает актуальные данные пользователя (lean), либо null если не найден.
+   */
+  private static async ensureSubscriptionUpToDateById(userId: string): Promise<IUser | null> {
+    const current = await User.findById(userId).lean<IUser>();
+    if (!current) return null;
+
+    if (
+      current.subscription?.isActive &&
+      current.subscription.endDate &&
+      current.subscription.endDate.getTime() <= Date.now()
+    ) {
+      await User.findByIdAndUpdate(userId, {
+        'subscription.isActive': false,
+        'subscription.type': 'basic',
+        'limits.canUseAdvancedFilters': SUBSCRIPTION_TIERS.basic.features.advancedFilters
+      });
+      return await User.findById(userId).lean<IUser>();
+    }
+    return current;
+  }
   /**
    * Проверяет может ли пользователь выполнить поиск
    */
   static async canUserSearch(userId: string): Promise<{ canSearch: boolean; reason?: string }> {
-    const user = await User.findById(userId);
+    const user = await this.ensureSubscriptionUpToDateById(userId);
     if (!user) {
       return { canSearch: false, reason: 'User not found' };
     }
 
     // Сброс лимитов если прошли сутки
-    await this.resetDailyLimitsIfNeeded(user);
+    await this.resetDailyLimitsIfNeeded(userId, user.limits);
 
     // Проверяем подписку
     if (user.subscription?.isActive && user.subscription.type !== 'basic') {
-      const tier = SUBSCRIPTION_TIERS[user.subscription.type];
-      if (tier.features.unlimitedSearches) {
-        return { canSearch: true };
-      }
+      // Любая активная платная подписка даёт безлимитный поиск
+      return { canSearch: true };
     }
 
     // Проверяем лимиты для базовых пользователей
@@ -161,52 +158,69 @@ export class MonetizationService {
   }
 
   /**
-   * Проверяет можно ли использовать супер-лайк
-   */
-  static async canUseSuperLike(userId: string): Promise<{ canUse: boolean; reason?: string }> {
-    const user = await User.findById(userId);
-    if (!user || !user.currency || user.currency.superLikes <= 0) {
-      return { 
-        canUse: false, 
-        reason: 'Недостаточно супер-лайков. Купите супер-лайки в магазине.' 
-      };
-    }
-
-    return { canUse: true };
-  }
-
-  /**
-   * Использует супер-лайк
-   */
-  static async useSuperLike(userId: string): Promise<void> {
-    await User.findByIdAndUpdate(userId, {
-      $inc: { 'currency.superLikes': -1 }
-    });
-  }
-
-  /**
    * Совершает покупку
    */
-  static async makePurchase(userId: string, itemKey: string, paymentData: any): Promise<{ success: boolean; message: string }> {
+  static async makePurchase(userId: string, itemKey: string, paymentData: any): Promise<{ success: boolean; message?: string; redirectUrl?: string; paymentId?: string }> {
     const item = PURCHASE_ITEMS[itemKey];
     if (!item) {
       return { success: false, message: 'Товар не найден' };
     }
 
-    // Здесь должна быть интеграция с платежной системой (Stripe, YooKassa, etc.)
-    // Для примера считаем что платеж прошел успешно
-    const paymentSuccess = await this.processPayment(paymentData, item.price);
-    
-    if (!paymentSuccess) {
-      return { success: false, message: 'Ошибка обработки платежа' };
+    // Создаем платёж в YooKassa (тест/продакшн)
+    // Сбор данных для чека (54-ФЗ): требуются контакт покупателя и позиция
+    const customerEmail: string | undefined = paymentData?.customer?.email;
+    const customerPhone: string | undefined = paymentData?.customer?.phone;
+    const vatCode: number = typeof paymentData?.vatCode === 'number' ? paymentData.vatCode : 1; // по умолчанию без НДС
+    const taxSystemCode: number | undefined = paymentData?.taxSystemCode; // опционально
+
+    if (!customerEmail && !customerPhone) {
+      return { success: false, message: 'Укажите email или phone покупателя для формирования чека' };
+    }
+
+    const receipt: any = {
+      customer: {
+        ...(customerEmail ? { email: customerEmail } : {}),
+        ...(customerPhone ? { phone: customerPhone } : {})
+      },
+      items: [
+        {
+          description: item.type === 'subscription' ? 'Подписка Premium' : 'Внутренняя валюта',
+          quantity: '1.00',
+          amount: { value: item.price.toFixed(2), currency: 'RUB' },
+          vat_code: vatCode,
+          payment_mode: 'full_payment',
+          payment_subject: item.type === 'subscription' ? 'service' : 'commodity'
+        }
+      ],
+      ...(typeof taxSystemCode === 'number' ? { tax_system_code: taxSystemCode } : {})
+    };
+
+    const paymentResult = await this.processPayment(item.price, `${item.type}:${itemKey}`, { userId, itemKey }, receipt);
+    if (!paymentResult.success && !paymentResult.redirectUrl) {
+      return { success: false, message: paymentResult.message || 'Ошибка обработки платежа' };
     }
 
     // Применяем покупку
+    // Если требуется подтверждение (redirect), возвращаем ссылку без немедленного начисления
+    if (paymentResult.redirectUrl) {
+      // Логируем платеж (идемпотентность и последующая подтверждающая обработка)
+      try {
+        await PaymentLog.create({
+          paymentId: paymentResult.paymentId as string,
+          userId: new mongoose.Types.ObjectId(userId),
+          itemKey,
+          status: 'pending'
+        });
+      } catch {}
+      return { success: true, redirectUrl: paymentResult.redirectUrl, paymentId: paymentResult.paymentId, message: 'Перейдите по ссылке для оплаты' };
+    }
+
+    // Если платёж уже успешно подтвержден/captured, применяем покупку
     if (item.type === 'subscription') {
-      if (!item.subscriptionType) {
+      if (!item.subscriptionType || item.subscriptionType !== 'premium') {
         return { success: false, message: 'Неверный тип подписки' };
       }
-      await this.activateSubscription(userId, item.subscriptionType);
+      await this.activateSubscription(userId, 'premium');
       return { success: true, message: `Подписка ${item.subscriptionType} активирована!` };
     } else {
       if (!item.amount) {
@@ -220,7 +234,7 @@ export class MonetizationService {
   /**
    * Активирует подписку
    */
-  private static async activateSubscription(userId: string, type: 'premium' | 'gold'): Promise<void> {
+  private static async activateSubscription(userId: string, type: 'premium'): Promise<void> {
     const tier = SUBSCRIPTION_TIERS[type];
     const startDate = new Date();
     const endDate = new Date(startDate.getTime() + tier.duration * 24 * 60 * 60 * 1000);
@@ -233,13 +247,8 @@ export class MonetizationService {
         isActive: true,
         autoRenew: false
       },
-      'limits.maxSearchDistance': tier.features.maxSearchDistance,
       'limits.canUseAdvancedFilters': tier.features.advancedFilters
     });
-
-    // Пополняем валюту согласно подписке
-    await this.addCurrency(userId, 'hearts', tier.features.dailyHearts);
-    await this.addCurrency(userId, 'superLikes', tier.features.dailySuperLikes);
 
     wsLogger.info('subscription_activated', `Подписка ${type} активирована для пользователя ${userId}`, {
       userId,
@@ -251,7 +260,7 @@ export class MonetizationService {
   /**
    * Добавляет валюту пользователю
    */
-  private static async addCurrency(userId: string, type: 'hearts' | 'boosts' | 'superLikes', amount: number): Promise<void> {
+  private static async addCurrency(userId: string, type: 'boosts', amount: number): Promise<void> {
     const updateField = `currency.${type}`;
     await User.findByIdAndUpdate(userId, {
       $inc: { [updateField]: amount }
@@ -259,47 +268,17 @@ export class MonetizationService {
   }
 
   /**
-   * Пополняет бесплатную валюту раз в день
-   */
-  static async refillFreeCurrency(userId: string): Promise<void> {
-    const user = await User.findById(userId);
-    if (!user) return;
-
-    const now = new Date();
-    const lastRefill = user.currency?.lastFreeRefill || new Date(0);
-    const daysSinceRefill = Math.floor((now.getTime() - lastRefill.getTime()) / (24 * 60 * 60 * 1000));
-
-    if (daysSinceRefill >= 1) {
-      const tier = user.subscription?.isActive ? 
-        SUBSCRIPTION_TIERS[user.subscription.type] : 
-        SUBSCRIPTION_TIERS.basic;
-
-      await User.findByIdAndUpdate(userId, {
-        'currency.hearts': tier.features.dailyHearts,
-        'currency.superLikes': tier.features.dailySuperLikes,
-        'currency.lastFreeRefill': now
-      });
-
-      wsLogger.info('free_currency_refilled', `Бесплатная валюта пополнена для пользователя ${userId}`, {
-        userId,
-        hearts: tier.features.dailyHearts,
-        superLikes: tier.features.dailySuperLikes
-      });
-    }
-  }
-
-  /**
    * Сбрасывает дневные лимиты если прошли сутки
    */
-  private static async resetDailyLimitsIfNeeded(user: IUser): Promise<void> {
-    if (!user.limits) return;
+  private static async resetDailyLimitsIfNeeded(userId: string, limits: IUser['limits'] | undefined): Promise<void> {
+    if (!limits) return;
 
     const now = new Date();
-    const lastReset = user.limits.lastReset;
-    const daysSinceReset = Math.floor((now.getTime() - lastReset.getTime()) / (24 * 60 * 60 * 1000));
+    const lastResetDate = limits.lastReset instanceof Date ? limits.lastReset : new Date(0);
+    const daysSinceReset = Math.floor((now.getTime() - lastResetDate.getTime()) / (24 * 60 * 60 * 1000));
 
-    if (daysSinceReset >= 1) {
-      await User.findByIdAndUpdate(user._id, {
+    if (daysSinceReset >= 1 || typeof limits.searchesToday !== 'number') {
+      await User.findByIdAndUpdate(userId, {
         'limits.searchesToday': 0,
         'limits.lastReset': now
       });
@@ -309,24 +288,153 @@ export class MonetizationService {
   /**
    * Заглушка для обработки платежа
    */
-  private static async processPayment(_paymentData: any, _amount: number): Promise<boolean> {
-    // Здесь должна быть интеграция с реальной платежной системой
-    // Пока возвращаем true для тестирования
-    return true;
+  private static async processPayment(amount: number, description: string, metadata: { userId: string; itemKey: string }, receipt: any): Promise<{ success: boolean; redirectUrl?: string; paymentId?: string; message?: string }> {
+    try {
+      const isTest = (config.yookassa.mode || 'test') === 'test';
+      const shopId = isTest ? config.yookassa.shopIdTest : config.yookassa.shopIdProd;
+      const secretKey = isTest ? config.yookassa.secretKeyTest : config.yookassa.secretKeyProd;
+
+      if (!shopId || !secretKey) {
+        wsLogger.warn('yookassa_config', 'YooKassa credentials are not configured');
+        return { success: false, message: 'YooKassa not configured' };
+      }
+
+      const idempotenceKey = crypto.randomUUID();
+      const authHeader = Buffer.from(`${shopId}:${secretKey}`).toString('base64');
+
+      const response = await fetch('https://api.yookassa.ru/v3/payments', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotence-Key': idempotenceKey,
+          'Authorization': `Basic ${authHeader}`
+        },
+        body: JSON.stringify({
+          amount: { value: amount.toFixed(2), currency: 'RUB' },
+          capture: true,
+          confirmation: { type: 'redirect', return_url: `${config.clientUrl}/payment/return` },
+          description,
+          metadata,
+          receipt
+        })
+      });
+
+      const data: any = await response.json();
+      if (!response.ok) {
+        wsLogger.warn('yookassa_payment_create', 'Failed to create payment', { status: response.status, data });
+        return { success: false, message: (data && data.description) || 'Create payment failed' };
+      }
+
+      // Если платеж требует подтверждения — отдаем ссылку на оплату
+      if (data && data.status === 'pending' && data.confirmation && data.confirmation.confirmation_url) {
+        return { success: true, redirectUrl: data.confirmation.confirmation_url, paymentId: data.id as string };
+      }
+
+      // Если платеж сразу прошел (редко), считаем успехом
+      if (data && (data.status === 'succeeded' || data.paid === true)) {
+        return { success: true, paymentId: data.id as string };
+      }
+
+      return { success: false, message: 'Unknown payment status' };
+    } catch (error) {
+      wsLogger.error('system', 'yookassa_payment', error as Error);
+      return { success: false, message: 'Payment exception' };
+    }
+  }
+
+  /**
+   * Получает платёж из YooKassa и применяет покупку по metadata
+   */
+  static async confirmAndApplyPayment(paymentId: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      const isTest = (config.yookassa.mode || 'test') === 'test';
+      const shopId = isTest ? config.yookassa.shopIdTest : config.yookassa.shopIdProd;
+      const secretKey = isTest ? config.yookassa.secretKeyTest : config.yookassa.secretKeyProd;
+
+      if (!shopId || !secretKey) {
+        return { success: false, message: 'YooKassa not configured' };
+      }
+
+      const authHeader = Buffer.from(`${shopId}:${secretKey}`).toString('base64');
+      const response = await fetch(`https://api.yookassa.ru/v3/payments/${paymentId}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Basic ${authHeader}`
+        }
+      });
+      const data: any = await response.json();
+      if (!response.ok) {
+        return { success: false, message: data?.description || 'Failed to fetch payment' };
+      }
+
+      if (!(data && (data.status === 'succeeded' || data.paid === true))) {
+        return { success: false, message: 'Payment not confirmed' };
+      }
+
+      const meta = (data.metadata || {}) as { userId?: string; itemKey?: string };
+      if (!meta.userId || !meta.itemKey) {
+        return { success: false, message: 'Missing metadata' };
+      }
+
+      // Применяем покупку согласно itemKey
+      // Защита от повторной обработки: если уже applied — выходим идемпотентно
+      const existing = await PaymentLog.findOne({ paymentId });
+      if (existing && existing.status === 'applied') {
+        return { success: true, message: 'Already processed' };
+      }
+
+      const applyResult = await this.applyPurchaseByItemKey(meta.userId, meta.itemKey);
+      if (applyResult.success) {
+        await PaymentLog.findOneAndUpdate(
+          { paymentId },
+          { status: 'applied', payload: data },
+          { upsert: true }
+        );
+      } else {
+        await PaymentLog.findOneAndUpdate(
+          { paymentId },
+          { status: 'failed', payload: data },
+          { upsert: true }
+        );
+      }
+      return applyResult;
+    } catch (error) {
+      wsLogger.error('system', 'yookassa_confirm', error as Error);
+      return { success: false, message: 'Confirm exception' };
+    }
+  }
+
+  private static async applyPurchaseByItemKey(userId: string, itemKey: string): Promise<{ success: boolean; message?: string }> {
+    const item = PURCHASE_ITEMS[itemKey];
+    if (!item) {
+      return { success: false, message: 'Товар не найден' };
+    }
+    if (item.type === 'subscription') {
+      if (!item.subscriptionType || item.subscriptionType !== 'premium') {
+        return { success: false, message: 'Неверный тип подписки' };
+      }
+      await this.activateSubscription(userId, 'premium');
+      return { success: true, message: `Подписка ${item.subscriptionType} активирована!` };
+    } else {
+      if (!item.amount) {
+        return { success: false, message: 'Неверное количество валюты' };
+      }
+      await this.addCurrency(userId, item.type, item.amount);
+      return { success: true, message: `${item.amount} ${item.type} добавлено к вашему счету!` };
+    }
   }
 
   /**
    * Получает информацию о статусе пользователя
    */
   static async getUserStatus(userId: string): Promise<any> {
-    const user = await User.findById(userId);
+    const user = await this.ensureSubscriptionUpToDateById(userId);
     if (!user) return null;
 
-    await this.resetDailyLimitsIfNeeded(user);
-    await this.refillFreeCurrency(userId);
+    await this.resetDailyLimitsIfNeeded(userId, user.limits);
 
     return {
-      subscription: user.subscription,
+      subscription: this.toSafeSubscription(user.subscription),
       currency: user.currency,
       limits: user.limits,
       analytics: user.analytics
@@ -337,10 +445,10 @@ export class MonetizationService {
    * Получает только лимиты поиска пользователя
    */
   static async getSearchLimits(userId: string): Promise<any> {
-    const user = await User.findById(userId);
+    const user = await this.ensureSubscriptionUpToDateById(userId);
     if (!user) return null;
 
-    await this.resetDailyLimitsIfNeeded(user);
+    await this.resetDailyLimitsIfNeeded(userId, user.limits);
 
     const maxSearches = user.subscription?.isActive && user.subscription.type !== 'basic' 
       ? SUBSCRIPTION_TIERS[user.subscription.type].features.unlimitedSearches ? -1 : 5

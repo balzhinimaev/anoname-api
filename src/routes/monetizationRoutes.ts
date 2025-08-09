@@ -4,6 +4,7 @@
  */
 
 import { Router } from 'express';
+import { authMiddleware } from '../middleware/authMiddleware';
 import { 
   getUserStatus,
   getSubscriptionTiers, 
@@ -12,8 +13,7 @@ import {
   checkSearchAvailability,
   getSearchLimits,
   checkBoostAvailability,
-  checkSuperLikeAvailability,
-  refillFreeCurrency
+  yookassaWebhook
 } from '../controllers/monetizationController';
 
 const router = Router();
@@ -48,7 +48,7 @@ const router = Router();
  *                     analytics:
  *                       type: object
  */
-router.get('/status', getUserStatus);
+router.get('/status', authMiddleware as any, getUserStatus as any);
 
 /**
  * @swagger
@@ -94,7 +94,7 @@ router.get('/items', getPurchaseItems);
  *             properties:
  *               itemKey:
  *                 type: string
- *                 example: "hearts_10"
+ *                 example: "boosts_1"
  *               paymentData:
  *                 type: object
  *                 example: { "payment_id": "12345", "amount": 59 }
@@ -102,7 +102,20 @@ router.get('/items', getPurchaseItems);
  *       200:
  *         description: Покупка успешна
  */
-router.post('/purchase', makePurchase);
+router.post('/purchase', authMiddleware as any, makePurchase as any);
+
+/**
+ * @swagger
+ * /api/monetization/webhook/yookassa:
+ *   post:
+ *     summary: Вебхук от YooKassa
+ *     tags: [Monetization]
+ *     description: Обработка уведомлений о платеже
+ *     responses:
+ *       200:
+ *         description: Вебхук обработан
+ */
+router.post('/webhook/yookassa', yookassaWebhook);
 
 /**
  * @swagger
@@ -116,7 +129,7 @@ router.post('/purchase', makePurchase);
  *       200:
  *         description: Информация о возможности поиска
  */
-router.get('/check/search', checkSearchAvailability);
+router.get('/check/search', authMiddleware as any, checkSearchAvailability as any);
 
 /**
  * @swagger
@@ -152,7 +165,7 @@ router.get('/check/search', checkSearchAvailability);
  *                     subscriptionType:
  *                       type: string
  */
-router.get('/limits/search', getSearchLimits);
+router.get('/limits/search', authMiddleware as any, getSearchLimits as any);
 
 /**
  * @swagger
@@ -166,34 +179,8 @@ router.get('/limits/search', getSearchLimits);
  *       200:
  *         description: Информация о возможности использования буста
  */
-router.get('/check/boost', checkBoostAvailability);
+router.get('/check/boost', authMiddleware as any, checkBoostAvailability as any);
 
-/**
- * @swagger
- * /api/monetization/check/superlike:
- *   get:
- *     summary: Проверить возможность использования супер-лайка
- *     tags: [Monetization]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Информация о возможности использования супер-лайка
- */
-router.get('/check/superlike', checkSuperLikeAvailability);
-
-/**
- * @swagger
- * /api/monetization/refill:
- *   post:
- *     summary: Пополнить бесплатную валюту
- *     tags: [Monetization]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Валюта пополнена
- */
-router.post('/refill', refillFreeCurrency);
+// Удалены эндпоинты супер-лайков и ежедневного пополнения
 
 export default router; 
