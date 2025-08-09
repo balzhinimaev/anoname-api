@@ -3,6 +3,7 @@ import Chat from '../models/Chat';
 import { wsManager } from '../server';
 import mongoose from 'mongoose';
 import { wsLogger } from '../utils/logger';
+import logger from '../utils/logger';
 import User from '../models/User';
 import { MonetizationService } from './MonetizationService';
 
@@ -19,7 +20,7 @@ export interface SearchCriteria {
     longitude: number;
     latitude: number;
   };
-  maxDistance?: number;
+  maxDistance?: number; // не используется как ограничение, оставлено для обратной совместимости
 }
 
 export interface SearchResult {
@@ -77,8 +78,8 @@ export class SearchService {
       }
     });
     
-    // Добавляем явный вывод в консоль для отладки
-    console.log('🔍 SEARCH START REQUEST:', {
+    // Централизованное логирование вместо console.log
+    logger.debug('Search start request', {
       userId,
       telegramId,
       useGeolocation: criteria.useGeolocation,
@@ -106,7 +107,8 @@ export class SearchService {
       minAcceptableRating: criteria.minAcceptableRating ?? -1,
       useGeolocation: criteria.useGeolocation,
       // maxDistance устанавливаем только если используется геолокация
-      maxDistance: criteria.useGeolocation ? (criteria.maxDistance || 10) : undefined
+      // Не ограничиваем максимальную дистанцию — ищем без $maxDistance
+      maxDistance: undefined
     };
 
     // Добавляем местоположение только если используется геолокация и координаты предоставлены
@@ -215,13 +217,13 @@ export class SearchService {
     // Если используем геолокацию, применяем стандартную логику
     else if (search.useGeolocation && search.location && Array.isArray(search.location.coordinates)) {
       matchCriteria.useGeolocation = true;
+      // Без ограничения по дистанции — сортировка по расстоянию ближе к клиенту
       matchCriteria.location = {
         $near: {
           $geometry: {
             type: 'Point',
             coordinates: search.location.coordinates
-          },
-          $maxDistance: (search.maxDistance || 10) * 1000 // конвертируем км в метры
+          }
         }
       };
     } else if (search.useGeolocation) {
@@ -526,7 +528,9 @@ export class SearchService {
       wsManager.io.to('search_stats_room').emit('search:stats', stats);
       return stats; // Возвращаем stats для соответствия предыдущему Promise<any>
     } catch (error) {
-      console.error('Failed to broadcast search stats:', error);
+      logger.error('Failed to broadcast search stats', {
+        error: error instanceof Error ? { message: error.message, stack: error.stack } : error
+      });
       return null; // Возвращаем null в случае ошибки
     }
   }
@@ -606,7 +610,9 @@ export class SearchService {
       }
     } catch (error) {
       this.updatingStats = false;
-      console.error('Failed to update and broadcast stats:', error);
+      logger.error('Failed to update and broadcast stats', {
+        error: error instanceof Error ? { message: error.message, stack: error.stack } : error
+      });
       throw error;
     }
   }
