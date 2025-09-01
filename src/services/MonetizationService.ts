@@ -71,6 +71,22 @@ export class MonetizationService {
       autoRenew: !!(sub && sub.autoRenew)
     };
   }
+
+  /**
+   * Активирует Premium по telegramId (30 дней по текущему тарифу premium)
+   */
+  static async activatePremiumByTelegramId(telegramId: string | number): Promise<{ success: boolean; message?: string }> {
+    const tg = Number(telegramId);
+    if (!telegramId || Number.isNaN(tg)) {
+      return { success: false, message: 'Invalid telegramId' };
+    }
+    const user = await User.findOne({ telegramId: tg }).lean<IUser>();
+    if (!user || !user._id) {
+      return { success: false, message: 'User not found' };
+    }
+    await this.activateSubscription(String((user as any)._id), 'premium');
+    return { success: true };
+  }
   /**
    * Проверяет срок действия подписки и деактивирует её при истечении.
    * Возвращает актуальные данные пользователя (lean), либо null если не найден.
@@ -236,8 +252,18 @@ export class MonetizationService {
    */
   private static async activateSubscription(userId: string, type: 'premium'): Promise<void> {
     const tier = SUBSCRIPTION_TIERS[type];
-    const startDate = new Date();
-    const endDate = new Date(startDate.getTime() + tier.duration * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    let startDate = now;
+    let endDate = new Date(now.getTime() + tier.duration * 24 * 60 * 60 * 1000);
+
+    // Если подписка уже активна и не просрочена — продлеваем от текущей даты окончания
+    try {
+      const current = await User.findById(userId).lean<IUser>();
+      if (current?.subscription?.isActive && current.subscription.endDate && current.subscription.endDate.getTime() > now.getTime()) {
+        startDate = current.subscription.startDate || startDate;
+        endDate = new Date(current.subscription.endDate.getTime() + tier.duration * 24 * 60 * 60 * 1000);
+      }
+    } catch {}
 
     await User.findByIdAndUpdate(userId, {
       subscription: {

@@ -24,6 +24,18 @@ class MetricsCollector extends EventEmitter {
       count: number;
       lastError?: Error;
     };
+    ws: {
+      validationFailed: number;
+      rateLimited: number;
+      validationFailedByEvent: Record<string, number>;
+      rateLimitedByEvent: Record<string, number>;
+    };
+    reports: {
+      submittedTotal: number;
+      errorsTotal: number;
+      rateLimitedTotal: number;
+      byReason: Record<string, number>;
+    };
   };
 
   private messageCountStartTime: number;
@@ -36,7 +48,19 @@ class MetricsCollector extends EventEmitter {
       messages: { total: 0, perMinute: 0 },
       searches: { active: 0, total: 0, successful: 0 },
       latency: { avg: 0, samples: [] },
-      errors: { count: 0 }
+      errors: { count: 0 },
+      ws: {
+        validationFailed: 0,
+        rateLimited: 0,
+        validationFailedByEvent: {},
+        rateLimitedByEvent: {},
+      },
+      reports: {
+        submittedTotal: 0,
+        errorsTotal: 0,
+        rateLimitedTotal: 0,
+        byReason: {}
+      }
     };
     this.messageCountStartTime = Date.now();
     this.startPeriodicUpdates();
@@ -83,6 +107,26 @@ class MetricsCollector extends EventEmitter {
     ) / this.metrics.latency.samples.length;
   }
 
+  // WS failure counters
+  wsValidationFailed(eventName: string) {
+    this.metrics.ws.validationFailed++;
+    if (!this.metrics.ws.validationFailedByEvent[eventName]) {
+      this.metrics.ws.validationFailedByEvent[eventName] = 0;
+    }
+    this.metrics.ws.validationFailedByEvent[eventName]++;
+  }
+
+  wsRateLimited(eventName: string) {
+    this.metrics.ws.rateLimited++;
+    if (!this.metrics.ws.rateLimitedByEvent[eventName]) {
+      this.metrics.ws.rateLimitedByEvent[eventName] = 0;
+    }
+    this.metrics.ws.rateLimitedByEvent[eventName]++;
+    if (eventName === 'chat:report') {
+      this.metrics.reports.rateLimitedTotal++;
+    }
+  }
+
   searchStarted() {
     this.metrics.searches.active++;
     this.metrics.searches.total++;
@@ -109,6 +153,24 @@ class MetricsCollector extends EventEmitter {
     };
   }
 
+  // Reports metrics
+  reportSubmitted(reason: string) {
+    this.metrics.reports.submittedTotal++;
+    if (!this.metrics.reports.byReason[reason]) {
+      this.metrics.reports.byReason[reason] = 0;
+    }
+    this.metrics.reports.byReason[reason]++;
+  }
+
+  reportErrored(reason: string) {
+    this.metrics.reports.errorsTotal++;
+    if (reason) {
+      if (!this.metrics.reports.byReason[reason]) {
+        this.metrics.reports.byReason[reason] = 0;
+      }
+    }
+  }
+
   // Сброс метрик
   reset() {
     this.metrics = {
@@ -116,7 +178,19 @@ class MetricsCollector extends EventEmitter {
       messages: { total: 0, perMinute: 0 },
       searches: { active: 0, total: 0, successful: 0 },
       latency: { avg: 0, samples: [] },
-      errors: { count: 0 }
+      errors: { count: 0 },
+      ws: {
+        validationFailed: 0,
+        rateLimited: 0,
+        validationFailedByEvent: {},
+        rateLimitedByEvent: {},
+      },
+      reports: {
+        submittedTotal: 0,
+        errorsTotal: 0,
+        rateLimitedTotal: 0,
+        byReason: {}
+      }
     };
     this.messageCountStartTime = Date.now();
   }

@@ -13,6 +13,12 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface IUser extends Document {
   /** Уникальный идентификатор пользователя в Telegram */
   telegramId: number;
+  /** Роль пользователя */
+  role: 'user' | 'admin';
+  /** A/B группа (вариант эксперимента) */
+  cohort?: 'A' | 'B';
+  /** Кампания/компания, из которой пришёл пользователь (например, из start payload) */
+  campaign?: string;
   /** Имя пользователя в Telegram (опционально) */
   username?: string;
   /** Имя пользователя */
@@ -41,6 +47,8 @@ export interface IUser extends Document {
   age?: number;
   /** Массив URL фотографий пользователя */
   photos?: string[];
+  /** Фото профиля (аватар) */
+  profilePhoto?: string;
   /** Статус онлайн (есть ли активный сокет) */
   isOnline: boolean;
   /** Время последней активности */
@@ -98,6 +106,18 @@ export interface IUser extends Document {
     /** Популярность профиля (просмотры) */
     profileViews: number;
   };
+
+  // === РЕФЕРАЛЫ ===
+  /** Уникальный реферальный код пользователя */
+  referralCode?: string;
+  /** Кто пригласил этого пользователя */
+  referredBy?: mongoose.Types.ObjectId;
+  /** Статистика по рефералам */
+  referralStats?: {
+    invitedTotal: number;
+    qualifiedTotal: number; // достигли целевого события (например, мэтч)
+    rewardedTotal: number;  // получили награду
+  };
 }
 
 /**
@@ -106,6 +126,9 @@ export interface IUser extends Document {
  */
 const UserSchema: Schema = new Schema({
   telegramId: { type: Number, required: true, unique: true },
+  role: { type: String, enum: ['user', 'admin'], default: 'user' },
+  cohort: { type: String, enum: ['A', 'B'], required: false },
+  campaign: { type: String },
   username: { type: String },
   firstName: { type: String },
   lastName: { type: String },
@@ -121,6 +144,7 @@ const UserSchema: Schema = new Schema({
   },
   age: { type: Number, min: 18 },
   photos: [{ type: String }],
+  profilePhoto: { type: String },
   isOnline: { type: Boolean, default: false },
   lastActive: { type: Date, default: Date.now },
   
@@ -155,6 +179,15 @@ const UserSchema: Schema = new Schema({
     averageRating: { type: Number, default: 0 },
     ratingsCount: { type: Number, default: 0 },
     profileViews: { type: Number, default: 0 }
+  },
+
+  // === ПОЛЯ РЕФЕРАЛОВ ===
+  referralCode: { type: String, unique: true, sparse: true },
+  referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  referralStats: {
+    invitedTotal: { type: Number, default: 0 },
+    qualifiedTotal: { type: Number, default: 0 },
+    rewardedTotal: { type: Number, default: 0 }
   }
 }, {
   timestamps: true

@@ -67,6 +67,36 @@ export interface ServerToClientEvents {
     chatId: string;
     userId: string;
     status: 'online' | 'offline';
+    reconnectExpiresAt?: string; // ISO: конец grace-периода
+    serverNow?: string;          // ISO: текущее время сервера
+    reason?: 'tma_closed' | 'network' | 'unknown';
+  }) => void;
+
+  // Подтверждение отправки жалобы
+  'report:submitted': (data: { chatId: string; reportId: string }) => void;
+
+  // Снимок сессии после connect/restore
+  'session:state': (data: {
+    activeChatId?: string;
+    partnerStatus?: {
+      chatId: string;
+      userId: string; // партнёр, чей статус описан
+      status: 'online' | 'offline';
+      reconnectExpiresAt?: string;
+      serverNow?: string;
+      reason?: 'tma_closed' | 'network' | 'unknown';
+    };
+    matchedUser?: {
+      telegramId: string;
+      gender?: 'male' | 'female';
+      age?: number;
+      rating?: number;
+      username?: string;
+      firstName?: string;
+      lastName?: string;
+      photos?: string[];
+      chatId: string;
+    }
   }) => void;
 
   // Контакты
@@ -79,9 +109,16 @@ export interface ServerToClientEvents {
     status: 'accepted' | 'declined' | 'blocked';
   }) => void;
 
+  // Блокировки
+  'user:blocked': (data: { userId: string }) => void;
+  'user:unblocked': (data: { userId: string }) => void;
+
   'error': (data: { message: string }) => void;
 
   'search:error': (data: { message: string }) => void;
+
+  // Предстартовая очередь
+  'prelaunch:stats': (data: { count: number }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -129,6 +166,13 @@ export interface ClientToServerEvents {
     comment?: string;
   }) => void;
 
+  // Жалоба на собеседника в активном чате
+  'chat:report': (data: {
+    chatId: string;
+    reason: 'spam' | 'insult' | 'scam' | 'sexual' | 'illegal' | 'other';
+    comment?: string;
+  }) => void;
+
   // Контакты
   'contact:request': (data: {
     to: string;
@@ -139,15 +183,25 @@ export interface ClientToServerEvents {
     status: 'accepted' | 'declined' | 'blocked';
   }) => void;
 
+  // Блокировки
+  'user:block': (data: { userId: string; reason?: string; expiresAt?: string }) => void;
+  'user:unblock': (data: { userId: string }) => void;
+
   // Подписка на статистику
   'search:subscribe_stats': () => void;
   'search:unsubscribe_stats': () => void;
+
+  // Предстартовая очередь
+  'prelaunch:subscribe': () => void;
+  'prelaunch:unsubscribe': () => void;
 }
 
 export interface SocketData {
   user: {
     _id: string | { toString(): string };
     telegramId: string;
+    isAdmin?: boolean;
+    cohort?: 'A' | 'B';
   };
   searchCriteria?: {
     desiredGender: ('male' | 'female' | 'any')[];

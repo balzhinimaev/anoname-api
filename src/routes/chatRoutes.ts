@@ -254,7 +254,6 @@ router.post(
   '/:chatId/messages',
   [
     body('content').notEmpty().withMessage('Сообщение не может быть пустым'),
-    body('sender').isMongoId().withMessage('Неверный ID отправителя'),
   ],
   validateRequest as express.RequestHandler,
   chatController.sendMessage as express.RequestHandler
@@ -313,3 +312,23 @@ router.put('/:chatId/messages/read', chatController.markMessagesAsRead as expres
  *         description: Чат не найден
  */
 router.delete('/:chatId', chatController.deactivateChat as express.RequestHandler); 
+
+/**
+ * Сохранить чат для текущего пользователя
+ */
+router.post('/:chatId/save', chatController.saveChat as express.RequestHandler);
+
+/**
+ * Удалить чат из сохранённых текущего пользователя
+ */
+router.post('/:chatId/unsave', chatController.unsaveChat as express.RequestHandler);
+
+/**
+ * Получить список сохранённых чатов текущего пользователя
+ */
+router.get('/saved/list', chatController.getSavedChats as express.RequestHandler);
+
+/**
+ * История всех чатов пользователя с агрегированной статистикой
+ */
+router.get('/history/all', chatController.getUserChatHistory as express.RequestHandler);

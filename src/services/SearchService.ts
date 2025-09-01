@@ -6,6 +6,9 @@ import { wsLogger } from '../utils/logger';
 import logger from '../utils/logger';
 import User from '../models/User';
 import { MonetizationService } from './MonetizationService';
+import { BlockService } from './BlockService';
+import AnalyticsEvent from '../models/AnalyticsEvent';
+import { ReferralService } from './ReferralService';
 
 export interface SearchCriteria {
   gender: 'male' | 'female';
@@ -93,6 +96,15 @@ export class SearchService {
       { status: 'cancelled' }
     );
 
+    // Узнаем премиум-статус пользователя (снимок на момент старта поиска)
+    let isPremium = false;
+    try {
+      const u = await User.findById(userId).select('subscription').lean();
+      if (u && (u as any).subscription?.isActive && (u as any).subscription?.type && (u as any).subscription.type !== 'basic') {
+        isPremium = true;
+      }
+    } catch {}
+
     // Создаем объект для нового поиска
     const searchData: any = {
       userId: new mongoose.Types.ObjectId(userId),
@@ -108,7 +120,8 @@ export class SearchService {
       useGeolocation: criteria.useGeolocation,
       // maxDistance устанавливаем только если используется геолокация
       // Не ограничиваем максимальную дистанцию — ищем без $maxDistance
-      maxDistance: undefined
+      maxDistance: undefined,
+      isPremium
     };
 
     // Добавляем местоположение только если используется геолокация и координаты предоставлены
@@ -123,6 +136,31 @@ export class SearchService {
     const search = await Search.create(searchData);
     
     // Логируем созданную запись поиска с фокусом на геоданные
+    // Аналитика: search_start (снимок критериев)
+    try {
+      // Опционально подтянем cohort пользователя для аналитики
+      let userCohort: 'A' | 'B' | undefined = undefined;
+      try {
+        const u = await User.findById(userId).select('cohort').lean();
+        userCohort = (u as any)?.cohort as any;
+      } catch {}
+      await AnalyticsEvent.create({
+        userId: new mongoose.Types.ObjectId(userId),
+        telegramId,
+        cohort: userCohort,
+        name: 'search_start',
+        props: {
+          gender: criteria.gender,
+          age: criteria.age,
+          desiredGender: criteria.desiredGender,
+          desiredAgeMin: criteria.desiredAgeMin,
+          desiredAgeMax: criteria.desiredAgeMax,
+          minAcceptableRating: criteria.minAcceptableRating ?? -1,
+          useGeolocation: criteria.useGeolocation,
+          distanceKm: criteria.maxDistance ?? null
+        }
+      } as any);
+    } catch {}
     wsLogger.info('search_record_created', 'Запись поиска создана', {
       userId,
       searchId: search._id?.toString(),
@@ -142,6 +180,23 @@ export class SearchService {
           search as ISearch & { _id: mongoose.Types.ObjectId },
           bestMatch as ISearch & { _id: mongoose.Types.ObjectId }
         );
+          // Аналитика: search_end (matched)
+          try {
+            const durationMs = Date.now() - (search.createdAt ? new Date(search.createdAt).getTime() : Date.now());
+            await AnalyticsEvent.create({
+              userId: search.userId,
+              telegramId: search.telegramId,
+              name: 'search_end',
+              props: {
+                outcome: 'matched',
+                durationMs,
+                useGeolocation: search.useGeolocation
+              }
+            } as any);
+          } catch {}
+          // Рефералы: отметим квалификацию и наградим реферера (best-effort)
+          try { await ReferralService.markQualified(String(search.userId)); } catch {}
+          try { await ReferralService.rewardReferrer(String(search.userId)); } catch {}
       }
     }
 
@@ -171,6 +226,22 @@ export class SearchService {
     // Атомарно обновляем статистику после отмены поиска
     await this.updateAndBroadcastStats('cancel', userId);
 
+    // Аналитика: search_end (cancelled)
+    if (search) {
+      try {
+        const durationMs = Date.now() - (search.createdAt ? new Date(search.createdAt).getTime() : Date.now());
+        await AnalyticsEvent.create({
+          userId: search.userId,
+          telegramId: search.telegramId,
+          name: 'search_end',
+          props: {
+            outcome: 'cancelled',
+            durationMs,
+            useGeolocation: search.useGeolocation
+          }
+        } as any);
+      } catch {}
+    }
     return search;
   }
 
@@ -217,13 +288,18 @@ export class SearchService {
     // Если используем геолокацию, применяем стандартную логику
     else if (search.useGeolocation && search.location && Array.isArray(search.location.coordinates)) {
       matchCriteria.useGeolocation = true;
-      // Без ограничения по дистанции — сортировка по расстоянию ближе к клиенту
+      // Ограничиваем радиус поиска по конфигу тарифа/настроек
+      const DEFAULT_MAX_KM = 20; // базовый радиус по умолчанию (можно вынести в конфиг/тариф)
+      // Если в документе поиска maxDistance отсутствует (так как не храним), используем дефолт
+      const km = DEFAULT_MAX_KM;
+      const meters = km * 1000;
       matchCriteria.location = {
         $near: {
           $geometry: {
             type: 'Point',
             coordinates: search.location.coordinates
-          }
+          },
+          $maxDistance: meters
         }
       };
     } else if (search.useGeolocation) {
@@ -237,12 +313,29 @@ export class SearchService {
       matchCriteria.useGeolocation = false;
     }
 
-    return await Search.find(matchCriteria);
+    // Для non-geo запросов можно сразу приоритизировать очередь сортировкой по премиуму и времени ожидания
+    const isGeo = !!matchCriteria.location;
+    const candidates = !isGeo
+      ? await Search.find(matchCriteria).sort({ isPremium: -1, createdAt: 1 })
+      : await Search.find(matchCriteria);
+
+    // Исключаем пары, где есть блок (в любую сторону)
+    // Оптимизация: получаем наборы блокировок для текущего пользователя одним запросом
+    try {
+      const { blockedByMeIds, blockedMeIds } = await BlockService.getActiveBlocksForUser(String(search.userId));
+      const filtered = candidates.filter((cand) => {
+        const candId = String(cand.userId);
+        return !(blockedByMeIds.has(candId) || blockedMeIds.has(candId));
+      });
+      return filtered;
+    } catch {
+      // В случае ошибки проверки вернём исходные кандидаты, чтобы не ломать поиск
+      return candidates;
+    }
   }
 
   private static selectBestMatch(search: ISearch, matches: ISearch[]): ISearch {
     try {
-      // Защита от пустого массива
       if (!matches || matches.length === 0) {
         wsLogger.info('select_best_match', 'Попытка выбрать лучший матч из пустого массива', {
           searchId: search._id?.toString()
@@ -250,23 +343,22 @@ export class SearchService {
         throw new Error('No matches available for selection');
       }
 
-      return matches.reduce((best, current) => {
-        try {
-          const bestScore = this.calculateMatchScore(search, best);
-          const currentScore = this.calculateMatchScore(search, current);
-          return currentScore > bestScore ? current : best;
-        } catch (error) {
-          // В случае ошибки при расчете, логируем и возвращаем лучший предыдущий матч
-          wsLogger.warn('match_score_calc', (error as Error).message, {
-            searchId: search._id?.toString(),
-            bestId: best._id?.toString(),
-            currentId: current._id?.toString()
-          });
-          return best;
-        }
-      }, matches[0]);
+      // Приоритезация: premium первыми, затем по времени ожидания (createdAt ASC), и только затем по скору
+      const sorted = matches.slice().sort((a: any, b: any) => {
+        const ap = a.isPremium ? 1 : 0;
+        const bp = b.isPremium ? 1 : 0;
+        if (ap !== bp) return bp - ap; // premium desc
+        const ac = (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+        const bc = (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+        if (ac !== bc) return ac - bc; // older first
+        // Tie-breaker: по скору совместимости
+        const as = this.calculateMatchScore(search, a);
+        const bs = this.calculateMatchScore(search, b);
+        return bs - as;
+      });
+
+      return sorted[0];
     } catch (error) {
-      // В случае общей ошибки возвращаем первый матч как запасной вариант
       wsLogger.warn('select_best_match', (error as Error).message, {
         searchId: search._id?.toString()
       });
@@ -354,109 +446,182 @@ export class SearchService {
   }
 
   private static async createMatch(search1: ISearch & { _id: mongoose.Types.ObjectId }, search2: ISearch & { _id: mongoose.Types.ObjectId }) {
-    try {
-      // Проверка данных перед созданием чата
-      if (!search1.userId || !search2.userId || !search1.telegramId || !search2.telegramId) {
-        throw new Error('Invalid search data for match creation');
-      }
-
-      // Создаем анонимный чат
-      const chat = await Chat.create({
-        // Участники как массив ObjectId
-        participants: [
-          search1.userId,
-          search2.userId
-        ],
-        messages: [],
-        // Добавляем тип чата (обязательное поле)
-        type: 'anonymous',
-        isActive: true,
-        startedAt: new Date()
-      });
-
-      // Проверяем, что чат был успешно создан и имеет _id
-      if (!chat || !chat._id) {
-        throw new Error('Failed to create chat for match');
-      }
-
-      wsLogger.info('match_created', 'Создан новый матч', {
-        chatId: chat._id.toString(),
-        search1Id: search1._id.toString(),
-        search2Id: search2._id.toString(),
-      });
-
-      // Обновляем статус обоих поисков
-      await Promise.all([
-        Search.findByIdAndUpdate(search1._id, {
-          status: 'matched',
-          matchedWith: {
-            userId: search2.userId,
-            telegramId: search2.telegramId,
-            chatId: chat._id
-          }
-        }),
-        Search.findByIdAndUpdate(search2._id, {
-          status: 'matched',
-          matchedWith: {
-            userId: search1.userId,
-            telegramId: search1.telegramId,
-            chatId: chat._id
-          }
-        })
-      ]);
-
-      // === СПИСЫВАЕМ ПОПЫТКИ ПОИСКА ТОЛЬКО ПРИ УСПЕШНОМ МАТЧЕ ===
-      await Promise.all([
-        MonetizationService.useSearchAttempt(search1.userId.toString()),
-        MonetizationService.useSearchAttempt(search2.userId.toString())
-      ]);
-
-      // Отправляем уведомления обоим пользователям
-      wsManager.sendToUser(search1.userId.toString(), 'search:matched', {
-        matchedUser: {
-          telegramId: search2.telegramId,
-          gender: search2.gender,
-          age: search2.age,
-          chatId: chat._id.toString()
-        }
-      });
-
-      wsManager.sendToUser(search2.userId.toString(), 'search:matched', {
-        matchedUser: {
-          telegramId: search1.telegramId,
-          gender: search1.gender,
-          age: search1.age,
-          chatId: chat._id.toString()
-        }
-      });
-
-      // Атомарно обновляем статистику после мэтча
-      await this.updateAndBroadcastStats('match', search1.userId.toString());
-
-      return chat;
-    } catch (error) {
-      wsLogger.warn('create_match', (error as Error).message, {
-        search1Id: search1._id.toString(),
-        search2Id: search2._id.toString(),
-        stack: (error as Error).stack
-      });
-      
-      // Попытка отката, если произошла ошибка после создания чата
+    // Транзакционный, безопасный к гонкам процесс создания мэтча
+    const MAX_RETRIES = 3;
+    let lastError: any = null;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const session = await mongoose.startSession();
       try {
-        // Обновляем статусы обратно на searching
-        await Promise.all([
-          Search.findByIdAndUpdate(search1._id, { status: 'searching', $unset: { matchedWith: 1 } }),
-          Search.findByIdAndUpdate(search2._id, { status: 'searching', $unset: { matchedWith: 1 } })
-        ]);
-      } catch (rollbackError) {
-        wsLogger.warn('match_rollback', (rollbackError as Error).message, {
-          search1Id: search1._id.toString(),
-          search2Id: search2._id.toString()
+        let createdChat: any = null;
+        await session.withTransaction(async () => {
+          // 1) Повторно читаем документы поиска в транзакции
+          const s1 = await Search.findById(search1._id).session(session);
+          const s2 = await Search.findById(search2._id).session(session);
+
+          if (!s1 || !s2) {
+            throw new Error('Search documents not found');
+          }
+          if (s1.status !== 'searching' || s2.status !== 'searching') {
+            throw new Error('One of searches is not in searching state');
+          }
+
+          // 2) Проверим, нет ли уже активного чата между участниками
+          const existingChat = await Chat.findOne({
+            participants: { $all: [s1.userId, s2.userId] },
+            isActive: true
+          }).session(session);
+
+          if (existingChat) {
+            // Обновим оба поиска на matched к найденному чату, если ещё searching
+            const upd1 = await Search.updateOne(
+              { _id: s1._id, status: 'searching' },
+              {
+                $set: {
+                  status: 'matched',
+                  matchedWith: {
+                    userId: s2.userId,
+                    telegramId: s2.telegramId,
+                    chatId: existingChat._id as any
+                  }
+                }
+              }
+            ).session(session);
+            const upd2 = await Search.updateOne(
+              { _id: s2._id, status: 'searching' },
+              {
+                $set: {
+                  status: 'matched',
+                  matchedWith: {
+                    userId: s1.userId,
+                    telegramId: s1.telegramId,
+                    chatId: existingChat._id as any
+                  }
+                }
+              }
+            ).session(session);
+
+            if (upd1.modifiedCount !== 1 || upd2.modifiedCount !== 1) {
+              throw new Error('Concurrent match update detected');
+            }
+
+            // Списываем попытки
+            await Promise.all([
+              MonetizationService.useSearchAttempt(String(s1.userId)),
+              MonetizationService.useSearchAttempt(String(s2.userId))
+            ]);
+
+            createdChat = existingChat;
+            return; // выходим из транзакции
+          }
+
+          // 3) Создаём чат внутри транзакции
+          const [chat] = await Chat.create([
+            {
+              participants: [s1.userId, s2.userId],
+              type: 'anonymous',
+              isActive: true
+            }
+          ], { session });
+
+          if (!chat || !chat._id) {
+            throw new Error('Failed to create chat for match');
+          }
+
+          // 4) Обновляем статусы обоих поисков условно (только если всё ещё searching)
+          const upd1 = await Search.updateOne(
+            { _id: s1._id, status: 'searching' },
+            {
+              $set: {
+                status: 'matched',
+                matchedWith: {
+                  userId: s2.userId,
+                  telegramId: s2.telegramId,
+                  chatId: chat._id as any
+                }
+              }
+            }
+          ).session(session);
+          const upd2 = await Search.updateOne(
+            { _id: s2._id, status: 'searching' },
+            {
+              $set: {
+                status: 'matched',
+                matchedWith: {
+                  userId: s1.userId,
+                  telegramId: s1.telegramId,
+                  chatId: chat._id as any
+                }
+              }
+            }
+          ).session(session);
+
+          if (upd1.modifiedCount !== 1 || upd2.modifiedCount !== 1) {
+            throw new Error('Concurrent match update detected');
+          }
+
+          // 5) Списываем попытки внутри транзакции
+          await Promise.all([
+            MonetizationService.useSearchAttempt(String(s1.userId)),
+            MonetizationService.useSearchAttempt(String(s2.userId))
+          ]);
+
+          createdChat = chat;
+        }, {
+          // Опционально можем указать уровни согласованности
         });
+
+        // Транзакция успешно завершена
+        if (createdChat) {
+          wsLogger.info('match_created', 'Создан новый матч (tx)', {
+            chatId: createdChat._id.toString(),
+            search1Id: search1._id.toString(),
+            search2Id: search2._id.toString(),
+          });
+
+          // Уведомления пользователям (вне транзакции)
+          wsManager.sendToUser(String(search1.userId), 'search:matched', {
+            matchedUser: {
+              telegramId: search2.telegramId,
+              gender: search2.gender,
+              age: search2.age,
+              chatId: createdChat._id.toString()
+            }
+          });
+          wsManager.sendToUser(String(search2.userId), 'search:matched', {
+            matchedUser: {
+              telegramId: search1.telegramId,
+              gender: search1.gender,
+              age: search1.age,
+              chatId: createdChat._id.toString()
+            }
+          });
+
+          await this.updateAndBroadcastStats('match', String(search1.userId));
+          await session.endSession();
+          return createdChat;
+        }
+
+        await session.endSession();
+        return null;
+
+      } catch (error: any) {
+        lastError = error;
+        try { await session.endSession(); } catch {}
+        wsLogger.warn('create_match_tx', error?.message || String(error), {
+          attempt,
+          search1Id: String(search1._id),
+          search2Id: String(search2._id)
+        });
+        // При временных конфликтах — повторим
+        if (attempt < MAX_RETRIES) {
+          continue;
+        } else {
+          throw error;
+        }
       }
-      
-      throw error; // Пробрасываем ошибку дальше для правильной обработки
     }
+    // Если дошли сюда — значит все попытки провалились
+    throw lastError || new Error('Failed to create match after retries');
   }
 
   static async getSearchStats() {
