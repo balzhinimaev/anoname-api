@@ -27,6 +27,44 @@ export class PrelaunchService {
     const count = await this.broadcastCount();
     return { joined: true, count };
   }
+
+  // Get user's position in prelaunch queue
+  static async getUserPosition(userId: string): Promise<{ position: number; isInQueue: boolean; joinedAt?: Date }> {
+    const prelaunchEntry = await Prelaunch.findOne({ userId }).select('joinedAt');
+    
+    if (!prelaunchEntry) {
+      return { position: 0, isInQueue: false };
+    }
+
+    // Count how many users joined before this user (position in queue)
+    const position = await Prelaunch.countDocuments({
+      joinedAt: { $lt: prelaunchEntry.joinedAt }
+    }) + 1;
+
+    return {
+      position,
+      isInQueue: true,
+      joinedAt: prelaunchEntry.joinedAt
+    };
+  }
+
+  // Get extended stats including user's position
+  static async getStatsWithUserInfo(userId: string): Promise<{
+    totalCount: number;
+    userPosition: number;
+    isInQueue: boolean;
+    joinedAt?: Date;
+  }> {
+    const totalCount = await this.getCount();
+    const userInfo = await this.getUserPosition(userId);
+    
+    return {
+      totalCount,
+      userPosition: userInfo.position,
+      isInQueue: userInfo.isInQueue,
+      joinedAt: userInfo.joinedAt
+    };
+  }
 }
 
 

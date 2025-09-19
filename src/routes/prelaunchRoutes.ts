@@ -4,12 +4,18 @@ import { PrelaunchService } from '../services/PrelaunchService';
 
 export const router = express.Router();
 
-// Публичный эндпоинт: текущий счётчик
-router.get('/stats', async (_req, res) => {
+// Защищенный эндпоинт: статистика с информацией о пользователе (требует Bearer токен)
+router.get('/stats', authMiddleware as any, async (req: any, res) => {
   try {
-    const count = await PrelaunchService.getCount();
-    res.json({ count });
-  } catch {
+    if (!req.user?.userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const stats = await PrelaunchService.getStatsWithUserInfo(req.user.userId);
+    res.json(stats);
+  } catch (error) {
+    console.error('Error getting prelaunch stats:', error);
     res.status(500).json({ error: 'Failed to get prelaunch stats' });
   }
 });
