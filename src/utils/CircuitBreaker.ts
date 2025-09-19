@@ -14,9 +14,9 @@ interface CircuitBreakerOptions {
 
 export class CircuitBreaker {
   private state: CircuitState = CircuitState.CLOSED;
-  private failures: number = 0;
-  private lastFailureTime: number = 0;
-  private halfOpenAttempts: number = 0;
+  private failures = 0;
+  private lastFailureTime = 0;
+  private halfOpenAttempts = 0;
   
   constructor(
     private readonly options: CircuitBreakerOptions = {
