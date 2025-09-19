@@ -1,0 +1,28 @@
+# Dockerfile для development среды с горячей загрузкой
+
+FROM node:18-alpine
+
+# Устанавливаем рабочую директорию
+WORKDIR /app
+
+# Устанавливаем системные зависимости для разработки
+RUN apk add --no-cache git
+
+# Копируем package.json и package-lock.json
+COPY package*.json ./
+
+# Устанавливаем все зависимости (включая devDependencies)
+RUN npm ci
+
+# Копируем исходный код
+COPY src/ ./src/
+COPY tsconfig.json ./
+
+# Создаем директорию для логов
+RUN mkdir -p logs
+
+# Экспонируем порт
+EXPOSE 3001
+
+# Используем nodemon для горячей загрузки при изменениях
+CMD ["npm", "run", "dev"]

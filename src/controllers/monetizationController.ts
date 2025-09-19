@@ -207,6 +207,48 @@ export const yookassaWebhook = async (req: Request, res: Response): Promise<void
 };
 
 /**
+ * Получено уведомление об успешной оплате Stars от бота
+ * Требует заголовок X-API-Key: BOT_BACKEND_SECRET
+ */
+export const starsPaymentSuccess = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const apiKey = (req.headers['x-api-key'] || req.headers['X-API-Key'] || '') as string;
+    const expected = process.env.BOT_BACKEND_SECRET || '';
+    if (!expected || !apiKey || apiKey !== expected) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { telegramId, itemKey, starCount, successfulPayment } = req.body || {};
+    if (!telegramId) {
+      res.status(400).json({ error: 'telegramId is required' });
+      return;
+    }
+
+    // Логгер (best effort)
+    try {
+      logger.info('stars_payment_success', {
+        type: 'stars_payment_success',
+        telegramId,
+        itemKey,
+        starCount,
+        hasPayload: Boolean(successfulPayment)
+      });
+    } catch {}
+
+    const result = await MonetizationService.activatePremiumByTelegramId(telegramId);
+    if (!result.success) {
+      res.status(400).json({ success: false, error: result.message || 'Failed to activate premium' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('stars_payment_success_error', { error: (error as Error)?.message });
+    res.status(500).json({ error: 'Internal error' });
+  }
+};
+
+/**
  * Проверить возможность поиска
  */
 export const checkSearchAvailability = async (req: Request, res: Response): Promise<void> => {

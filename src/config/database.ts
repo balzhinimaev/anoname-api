@@ -4,11 +4,12 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/telegram-dating';
+const MONGODB_DBNAME = process.env.MONGODB_DBNAME || 'anoname';
 
 export const connectDB = async () => {
   try {
     await mongoose.connect(MONGODB_URI, {
-      dbName: "anoname"
+      dbName: MONGODB_DBNAME
     });
     console.log('MongoDB подключена успешно');
   } catch (error) {

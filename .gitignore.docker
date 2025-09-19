@@ -1,0 +1,77 @@
+# Docker и окружение
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.staging
+
+# Docker volumes (если используются bind mounts)
+docker/volumes/
+docker/ssl/
+docker/logs/
+
+# Docker Compose override файлы
+docker-compose.override.yml
+
+# Build artifacts
+dist/
+build/
+*.tsbuildinfo
+
+# Логи
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# IDE и редакторы
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Тесты
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# Кэш
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+
+# SSL сертификаты
+*.pem
+*.key
+*.crt
+*.p12
+
+# Бэкапы баз данных
+backups/
+*.dump
+*.sql
+
+# Темп файлы
+tmp/
+temp/

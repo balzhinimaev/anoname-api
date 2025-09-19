@@ -4,6 +4,7 @@ import { wsManager } from '../server';
 import mongoose from 'mongoose';
 import { wsLogger } from '../utils/logger';
 import { SearchService } from './SearchService';
+import { BlockService } from './BlockService';
 
 export class ChatService {
   static async sendMessage(
@@ -19,6 +20,16 @@ export class ChatService {
 
     if (!chat.participants.some((p) => p.toString() === userId)) {
       throw new Error('User is not a participant of this chat');
+    }
+
+    // Блокировки: если между участниками есть блок — запретить отправку
+    const participants = chat.participants.map((p) => p.toString());
+    const otherUserId = participants.find((p) => p !== userId);
+    if (otherUserId) {
+      const hasBlock = await BlockService.anyBlockBetween(userId, otherUserId);
+      if (hasBlock) {
+        throw new Error('Messaging blocked by user settings');
+      }
     }
 
     // 1. Проверяем, если это ответ на сообщение
@@ -135,6 +146,14 @@ export class ChatService {
     wsLogger.info('chat_ended', `Chat ${chatId} ended by user ${userId}`, {
       reason,
     });
+
+    // Выполняем очистку комнаты и локального состояния (для сценариев авто-таймаута тоже)
+    try {
+      const participants = chat.participants.map((p) => p.toString());
+      wsManager.cleanupChatRoom(chatId, participants);
+    } catch (cleanupError) {
+      wsLogger.warn('chat_end_cleanup_service', (cleanupError as Error).message, { chatId });
+    }
 
     // Обновляем глобальную статистику
     SearchService.broadcastSearchStats().catch(err => {

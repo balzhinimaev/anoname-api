@@ -47,4 +47,8 @@ const MessageSchema: Schema = new Schema({
   }
 });
 
+// Индексы для эффективной пагинации истории сообщений
+MessageSchema.index({ chatId: 1, timestamp: -1 });
+MessageSchema.index({ chatId: 1, _id: -1 });
+
 export default mongoose.model<IMessage>('Message', MessageSchema); 

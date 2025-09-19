@@ -89,9 +89,9 @@ export class RatingService {
     
     if (ratings.length > 0) {
       const averageRating = ratings.reduce((sum, r) => sum + r.score, 0) / ratings.length;
-      
+      const rounded = Number(averageRating.toFixed(2));
       await User.findByIdAndUpdate(userId, {
-        $set: { 'stats.rating': averageRating }
+        $set: { rating: rounded }
       });
     }
   }

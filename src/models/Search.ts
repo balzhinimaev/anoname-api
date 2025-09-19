@@ -22,6 +22,8 @@ export interface ISearch {
     coordinates: [number, number]; // [longitude, latitude]
   };
   maxDistance?: number; // в километрах
+  // Премиум-признак на момент начала поиска (снимок для приоритезации очереди)
+  isPremium?: boolean;
 
   // Результат мэтчинга
   matchedWith?: {
@@ -110,6 +112,10 @@ const searchSchema = new mongoose.Schema<ISearch>({
     max: 100, // максимум 100 км
     default: 10
   },
+  isPremium: {
+    type: Boolean,
+    default: false
+  },
   
   matchedWith: {
     userId: {
@@ -130,10 +136,18 @@ const searchSchema = new mongoose.Schema<ISearch>({
 searchSchema.index({ userId: 1 });
 searchSchema.index({ telegramId: 1 });
 searchSchema.index({ status: 1 });
-searchSchema.index({ location: '2dsphere' });
-searchSchema.index({ rating: 1 });
 searchSchema.index({ gender: 1 });
 searchSchema.index({ age: 1 });
+searchSchema.index({ rating: 1 });
+// Гео-индекс для поиска по координатам
+searchSchema.index({ location: '2dsphere' });
+// Приоритезация очереди: сначала премиум, затем старшие по времени
+searchSchema.index({ isPremium: -1, createdAt: 1 });
+// Единственный активный поиск на пользователя
+searchSchema.index(
+  { userId: 1, status: 1 },
+  { unique: true, partialFilterExpression: { status: 'searching' } }
+);
 
 // Автоматическое истечение поиска через 30 минут
 searchSchema.index({ createdAt: 1 }, { expireAfterSeconds: 1800 });

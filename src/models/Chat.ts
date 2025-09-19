@@ -12,12 +12,18 @@ import mongoose from 'mongoose';
 export interface IChat {
   /** Массив ID участников чата */
   participants: mongoose.Types.ObjectId[];
+  /** Канонизированный первый участник (минимальный ID) */
+  userA?: mongoose.Types.ObjectId;
+  /** Канонизированный второй участник (максимальный ID) */
+  userB?: mongoose.Types.ObjectId;
   /** Последнее сообщение в чате */
   lastMessage?: mongoose.Types.ObjectId;
   /** Тип чата: анонимный или постоянный */
   type: 'anonymous' | 'permanent';
   /** Статус активности чата */
   isActive: boolean;
+  /** Пользователи, сохранившие завершённый чат */
+  savedBy?: mongoose.Types.ObjectId[];
   /** Время истечения анонимного чата */
   expiresAt?: Date;
   /** Время создания чата */
@@ -42,6 +48,16 @@ const chatSchema = new mongoose.Schema<IChat>({
     ref: 'User',
     required: true
   }],
+  userA: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false
+  },
+  userB: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false
+  },
   lastMessage: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Message'
@@ -55,6 +71,12 @@ const chatSchema = new mongoose.Schema<IChat>({
     type: Boolean,
     default: true
   },
+  savedBy: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false,
+    default: []
+  }],
   expiresAt: {
     type: Date
   },
@@ -76,14 +98,17 @@ const chatSchema = new mongoose.Schema<IChat>({
 chatSchema.index({ participants: 1 });
 chatSchema.index({ isActive: 1 });
 chatSchema.index({ type: 1 });
-
-/**
- * TTL индекс для автоматического удаления анонимных чатов по истечении срока
- */
+chatSchema.index({ savedBy: 1 });
+// Для поиска истории сообщений с сортировкой по времени
+// Индексы на Message добавлены в самой модели Message
+// Гарантия единственного активного чата между парой пользователей
 chatSchema.index(
-  { expiresAt: 1 },
-  { expireAfterSeconds: 0 }
+  { userA: 1, userB: 1 },
+  { unique: true, partialFilterExpression: { isActive: true } }
 );
+
+// Ранее здесь был TTL-индекс по expiresAt для автоудаления анонимных чатов.
+// Убран, чтобы история переписки не удалялась автоматически.
 
 /**
  * Проверяет, является ли пользователь участником чата
@@ -121,9 +146,19 @@ chatSchema.statics.findActiveChatsForUser = async function(userId: mongoose.Type
  * Middleware для автоматической установки времени истечения анонимных чатов
  */
 chatSchema.pre('save', function(next) {
-  if (this.isNew && this.type === 'anonymous') {
-    // Анонимный чат истекает через 24 часа
-    this.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  // Канонизируем пару
+  if (Array.isArray(this.participants) && this.participants.length >= 2) {
+    try {
+      const a = this.participants[0];
+      const b = this.participants[1];
+      if (a && b) {
+        const [minId, maxId] = [a.toString(), b.toString()].sort();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (this as any).userA = new mongoose.Types.ObjectId(minId);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (this as any).userB = new mongoose.Types.ObjectId(maxId);
+      }
+    } catch {}
   }
   next();
 });

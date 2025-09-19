@@ -13,7 +13,8 @@ import {
   checkSearchAvailability,
   getSearchLimits,
   checkBoostAvailability,
-  yookassaWebhook
+  yookassaWebhook,
+  starsPaymentSuccess
 } from '../controllers/monetizationController';
 
 const router = Router();
@@ -116,6 +117,40 @@ router.post('/purchase', authMiddleware as any, makePurchase as any);
  *         description: Вебхук обработан
  */
 router.post('/webhook/yookassa', yookassaWebhook);
+
+/**
+ * @swagger
+ * /api/monetization/stars/success:
+ *   post:
+ *     summary: Уведомление от бота об успешной оплате через Telegram Stars
+ *     tags: [Monetization]
+ *     description: Бекенд бота вызывает этот эндпоинт после получения successful_payment. Требуется заголовок X-API-Key.
+ *     parameters:
+ *       - in: header
+ *         name: X-API-Key
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               telegramId:
+ *                 type: string
+ *               itemKey:
+ *                 type: string
+ *               starCount:
+ *                 type: number
+ *               successfulPayment:
+ *                 type: object
+ *     responses:
+ *       200:
+ *         description: Подписка активирована
+ */
+router.post('/stars/success', starsPaymentSuccess as any);
 
 /**
  * @swagger

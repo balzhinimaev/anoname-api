@@ -82,12 +82,12 @@ router.post(
   '/register',
   [
     body('telegramId').isNumeric().withMessage('Неверный формат Telegram ID'),
-    body('username').optional(),
-    body('firstName').optional(),
-    body('lastName').optional(),
-    body('bio').optional(),
-    body('gender').optional().isIn(['male', 'female', 'other']),
-    body('age').optional().isInt({ min: 18 }),
+    body('platform').equals('telegram').withMessage('platform должен быть "telegram"'),
+    body('initData').isString().notEmpty().withMessage('initData обязателен'),
+    body('exp').optional().isIn(['A','B']).withMessage('exp должен быть A или B'),
+    body('referralCode').optional().isString(),
+    body('campaign').optional().isString(),
+    body('profilePhoto').optional().isString(),
   ],
   validateRequest as express.RequestHandler,
   authController.register as express.RequestHandler
