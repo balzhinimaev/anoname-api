@@ -1,0 +1,60 @@
+# Node.js
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Директория сборки (для dev образа)
+dist
+
+# Логи
+logs
+*.log
+
+# Среда выполнения
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# IDE и редакторы
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Документация
+README.md
+*.md
+!README.md
+
+# CI/CD
+.github
+.gitlab-ci.yml
+
+# Тесты
+coverage
+.nyc_output
+
+# Кэш
+.cache
+.parcel-cache
+
+# Временные файлы
+tmp
+temp
