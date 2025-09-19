@@ -11,6 +11,7 @@ import { ReferralService } from '../services/ReferralService';
 import { wsManager } from '../server';
 import logger from '../utils/logger';
 import { PrelaunchService } from '../services/PrelaunchService';
+import { TelegramNotificationService } from '../services/TelegramNotificationService';
 
 const generateDeviceId = (telegramId: string, userAgent: string) => {
   return crypto
@@ -213,6 +214,34 @@ export const register = async (req: Request, res: Response): Promise<void> => {
       telegramId: user.telegramId,
       hasReferralCode: Boolean(referralCode)
     });
+
+    // Отправляем уведомление в Telegram канал о регистрации
+    try {
+      await TelegramNotificationService.sendUserRegistrationNotification({
+        telegramId: user.telegramId,
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        bio: user.bio,
+        gender: user.gender,
+        age: user.age,
+        profilePhoto: user.profilePhoto,
+        cohort: user.cohort,
+        campaign: campaign,
+        referralCode: referralCode,
+        platform: platform,
+        userAgent: String(req.headers['user-agent'] || ''),
+        ip: req.ip,
+        registrationDate: new Date()
+      });
+    } catch (notificationError) {
+      logger.error('Ошибка отправки уведомления о регистрации', {
+        type: 'telegram_notification_error',
+        userId: String((user as any)._id),
+        telegramId: user.telegramId,
+        error: notificationError instanceof Error ? notificationError.message : 'Unknown error'
+      });
+    }
 
     res.status(201).json({
       token,

@@ -99,7 +99,7 @@ router.post(
  *   post:
  *     tags: [Аутентификация]
  *     summary: Аутентификация пользователя
- *     description: Аутентифицирует существующего пользователя и возвращает JWT токен
+ *     description: Аутентифицирует существующего пользователя и возвращает JWT токен. Поддерживает аутентификацию через Telegram initData или сервисный API-ключ.
  *     requestBody:
  *       required: true
  *       content:
@@ -111,6 +111,26 @@ router.post(
  *             properties:
  *               telegramId:
  *                 type: number
+ *                 description: Telegram ID пользователя
+ *                 example: 1272270574
+ *               initData:
+ *                 type: string
+ *                 description: Telegram WebApp initData строка (обязательна если REQUIRE_TG_INITDATA=true)
+ *                 example: "query_id=AAHdF6IQAAAAAN0XohDhrOrc&user=%7B%22id%22%3A279058397%2C%22first_name%22%3A%22Vladislav%22%2C%22last_name%22%3A%22Kibenko%22%2C%22username%22%3A%22vdkfrost%22%2C%22language_code%22%3A%22ru%22%7D&auth_date=1662771648&hash=c501b71e775f74ce10e377dea85a7ea24ecd640b223ea86dfe453e0eaed2e2b2"
+ *               platform:
+ *                 type: string
+ *                 description: Платформа клиента
+ *                 example: "telegram"
+ *               exp:
+ *                 type: string
+ *                 enum: [A, B]
+ *                 description: Экспериментальная группа для A/B тестирования
+ *     parameters:
+ *       - in: header
+ *         name: X-API-Key
+ *         schema:
+ *           type: string
+ *         description: Сервисный API-ключ для технической аутентификации (альтернатива initData)
  *     responses:
  *       200:
  *         description: Успешная аутентификация
@@ -119,7 +139,18 @@ router.post(
  *             schema:
  *               $ref: '#/components/schemas/AuthResponse'
  *       401:
- *         description: Неверные учетные данные
+ *         description: Неверные учетные данные или неверная подпись initData
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Неверная подпись Telegram initData"
+ *                 code:
+ *                   type: string
+ *                   example: "HASH_MISSING"
  *       404:
  *         description: Пользователь не найден
  */
