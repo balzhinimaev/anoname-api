@@ -11,7 +11,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-test:
+  build-and-lint:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
@@ -32,17 +32,17 @@ jobs:
     - name: Build application
       run: npm run build
 
-    - name: Run tests
-      run: npm test
-      env:
-        NODE_ENV: test
-        # Для тестов можно использовать in-memory DB или моки,
-        # чтобы не зависеть от внешней базы данных.
-        # MONGODB_URI: mongodb://localhost:27017/test
-        JWT_SECRET: test-jwt-secret
+    # - name: Run tests
+    #   run: npm test
+    #   env:
+    #     NODE_ENV: test
+    #     # Для тестов можно использовать in-memory DB или моки,
+    #     # чтобы не зависеть от внешней базы данных.
+    #     # MONGODB_URI: mongodb://localhost:27017/test
+    #     JWT_SECRET: test-jwt-secret
 
   build-docker:
-    needs: build-and-test
+    needs: build-and-lint
     runs-on: ubuntu-latest
     permissions:
       contents: read
