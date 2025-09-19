@@ -117,12 +117,12 @@ jobs:
               image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
               container_name: telegram-dating-api
               ports:
-                - "3001:3001"
+                - "${PORT:-3001}:${PORT:-3001}"
               env_file:
                 - .env
               restart: unless-stopped
               healthcheck:
-                test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"]
+                test: ["CMD", "node", "-e", "require('http').get('http://localhost:${PORT:-3001}/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => process.exit(1))"]
                 interval: 30s
                 timeout: 10s
                 retries: 3
