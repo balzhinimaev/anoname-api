@@ -17,6 +17,7 @@ export default {
   clientUrl: process.env.CLIENT_URL || 'http://localhost:3000',
   // Telegram Bot API
   botToken: process.env.BOT_TOKEN || '',
+  botBackendSecret: process.env.BOT_BACKEND_SECRET || '',
   // Требовать initData на бэке (аналог фронтового VITE_REQUIRE_TG_INITDATA)
   requireTgInitData: (process.env.REQUIRE_TG_INITDATA || 'false').toLowerCase() === 'true',
   // Максимальный возраст initData в секундах

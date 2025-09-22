@@ -258,6 +258,12 @@ export const register = async (req: Request, res: Response): Promise<void> => {
     });
     // После успешной регистрации — автоматически помещаем в предстартовую очередь
     try { await PrelaunchService.join(String((user as any)._id)); } catch {}
+
+    // Обновляем статус лида как зарегистрированного
+    try { 
+      const { LeadService } = await import('../services/LeadService');
+      await LeadService.markAsRegistered(String(user.telegramId)); 
+    } catch {}
   } catch (error) {
     logger.error('auth_register_exception', { message: (error as Error)?.message });
     res.status(500).json({ error: 'Ошибка при регистрации пользователя' });

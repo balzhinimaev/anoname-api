@@ -27,6 +27,7 @@ import mongoose from 'mongoose';
 import config from './config';
 import { WebSocketManager } from './websocket/WebSocketManager';
 import prelaunchRouter from './routes/prelaunchRoutes';
+import { router as leadRouter } from './routes/leadRoutes';
 import User from './models/User';
 import Token from './models/Token';
 import logger from './utils/logger';
@@ -134,6 +135,7 @@ app.use('/api/monitoring', monitoringRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/prelaunch', prelaunchRouter);
+app.use('/api/leads', leadRouter);
 app.use('/telegram', botWebhookRouter);
 app.use('/api/analytics', botAnalyticsRouter);
 app.get('/health', (_req, res) => {

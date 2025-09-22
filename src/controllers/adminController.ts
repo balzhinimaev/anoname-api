@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import User from '../models/User';
 import Prelaunch from '../models/Prelaunch';
+import Lead from '../models/Lead';
 
 export const searchUsers = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -115,6 +116,56 @@ export const exportPrelaunchCsv = async (_req: Request, res: Response): Promise<
     res.send(header + rows + (rows ? '\n' : ''));
   } catch (e) {
     res.status(500).json({ error: 'Не удалось экспортировать CSV' });
+  }
+};
+
+export const getLeadStats = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const total = await Lead.countDocuments({});
+    const registered = await Lead.countDocuments({ isRegistered: true });
+    res.json({ total, registered, unregistered: total - registered });
+  } catch (e) {
+    res.status(500).json({ error: 'Не удалось получить статистику лидов' });
+  }
+};
+
+export const getLeadList = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10));
+    const limit = Math.min(1000, Math.max(1, parseInt(String(req.query.limit || '100'), 10)));
+    const sort = String(req.query.sort || 'desc'); // 'asc' | 'desc' по createdAt
+
+    const [total, items] = await Promise.all([
+      Lead.countDocuments({}),
+      Lead.find({})
+        .sort({ createdAt: sort === 'asc' ? 1 : -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean()
+    ]);
+
+    res.json({
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit),
+      items
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Не удалось получить список лидов' });
+  }
+};
+
+export const exportLeadCsv = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const items = await Lead.find({}).sort({ createdAt: 1 }).lean();
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="leads_export.csv"');
+    const header = 'telegramId,createdAt,isRegistered\n';
+    const rows = items.map((i: any) => `${i.telegramId},${new Date(i.createdAt).toISOString()},${i.isRegistered}`).join('\n');
+    res.send(header + rows + (rows ? '\n' : ''));
+  } catch (e) {
+    res.status(500).json({ error: 'Не удалось экспортировать CSV лидов' });
   }
 };
 

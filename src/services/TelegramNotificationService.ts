@@ -24,6 +24,12 @@ export interface UserRegistrationData {
   registrationDate: Date;
 }
 
+export interface LeadData {
+  telegramId: string;
+  isRegistered: boolean;
+  createdAt: Date;
+}
+
 export class TelegramNotificationService {
   private static readonly CHANNEL_ID = '-1002281903962';
   private static readonly BOT_TOKEN = config.botToken;
@@ -197,6 +203,29 @@ export class TelegramNotificationService {
 
 ${userData.bio ? `\n📝 <b>Описание:</b>\n${userData.bio}` : ''}
 ${userData.profilePhoto ? `\n🖼️ <b>Фото профиля:</b> <a href="${userData.profilePhoto}">Посмотреть</a>` : ''}
+    `.trim();
+
+    await this.sendMessage(message);
+  }
+
+  /**
+   * Отправляет уведомление о новом лиде
+   */
+  static async sendLeadNotification(leadData: LeadData): Promise<void> {
+    const moscowTime = this.formatMoscowDateTime(leadData.createdAt);
+    const status = leadData.isRegistered ? '✅ Зарегистрирован' : '⏳ Ожидает регистрации';
+
+    const message = `
+#лид #anoname
+
+🆕 <b>Новый лид добавлен!</b>
+
+👤 <b>Информация о лиде:</b>
+• Telegram ID: <code>${leadData.telegramId}</code>
+• Статус: ${status}
+
+⏰ <b>Время добавления (МСК):</b>
+<code>${moscowTime}</code>
     `.trim();
 
     await this.sendMessage(message);
