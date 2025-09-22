@@ -13,7 +13,8 @@
     "drop-chat-ttl": "ts-node src/scripts/dropChatTTLIndex.ts",
     "create-test-user": "ts-node src/scripts/createTestUser.ts",
     "test-websocket": "ts-node src/scripts/testWebSocket.ts",
-    "test-telegram-notifications": "ts-node src/scripts/testTelegramNotifications.ts"
+    "test-telegram-notifications": "ts-node src/scripts/testTelegramNotifications.ts",
+    "migrate-leads": "ts-node src/scripts/migrateLeadsFromFile.ts"
   },
   "keywords": [],
   "author": "",

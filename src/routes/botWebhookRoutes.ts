@@ -1,6 +1,8 @@
 import express from 'express';
 import logger from '../utils/logger';
 import AnalyticsEvent from '../models/AnalyticsEvent';
+import { botAuth } from '../middleware/botAuth';
+import { getPrelaunchStats } from '../controllers/botController';
 
 const router = express.Router();
 
@@ -61,6 +63,9 @@ router.post('/webhook', async (req, res) => {
     res.status(500).json({ error: 'Internal error' });
   }
 });
+
+// Bot prelaunch stats endpoint secured by BOT_BACKEND_SECRET
+router.get('/prelaunch/stats', botAuth, getPrelaunchStats);
 
 export { router as botWebhookRouter };
 

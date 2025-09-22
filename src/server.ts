@@ -136,7 +136,7 @@ app.use('/api/admin', adminRouter);
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/prelaunch', prelaunchRouter);
 app.use('/api/leads', leadRouter);
-app.use('/telegram', botWebhookRouter);
+app.use('/api/telegram', botWebhookRouter);
 app.use('/api/analytics', botAnalyticsRouter);
 app.get('/health', (_req, res) => {
   res.status(200).json({ status: 'OK' });

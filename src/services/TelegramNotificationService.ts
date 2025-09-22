@@ -248,4 +248,11 @@ ${userData.profilePhoto ? `\n🖼️ <b>Фото профиля:</b> <a href="${
 
     await this.sendMessage(message);
   }
+
+  /**
+   * Отправляет произвольное сообщение в канал (публичный метод)
+   */
+  static async sendCustomMessage(text: string): Promise<void> {
+    await this.sendMessage(text);
+  }
 }

@@ -72,4 +72,36 @@ export class LeadService {
       return false;
     }
   }
+
+  static async markViewedPrelaunchStats(telegramId: string): Promise<{ updated: boolean; isNew: boolean }> {
+    try {
+      const existingLead = await Lead.findOne({ telegramId });
+      
+      if (existingLead) {
+        // Update existing lead
+        const result = await Lead.updateOne(
+          { telegramId },
+          { 
+            $set: { 
+              viewedPrelaunchStats: true,
+              viewedPrelaunchStatsAt: new Date()
+            } 
+          }
+        );
+        return { updated: result.modifiedCount > 0, isNew: false };
+      } else {
+        // Create new lead with viewed stats
+        await Lead.create({
+          telegramId,
+          createdAt: new Date(),
+          isRegistered: false,
+          viewedPrelaunchStats: true,
+          viewedPrelaunchStatsAt: new Date()
+        });
+        return { updated: true, isNew: true };
+      }
+    } catch (error) {
+      throw new Error('Failed to mark viewed prelaunch stats');
+    }
+  }
 }
