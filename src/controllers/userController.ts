@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import User from '../models/User';
 import { BlockService } from '../services/BlockService';
 import { ReferralService } from '../services/ReferralService';
+import { MonetizationService } from "../services/MonetizationService";
 
 // Поля, доступные для просмотра другими пользователями (публичный профиль)
 const PUBLIC_USER_PROJECTION = {
@@ -32,6 +33,57 @@ const toPublicUser = (user: any) => ({
 	lastActive: user.lastActive,
 	cohort: user.cohort,
 });
+
+export const canSearch = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { telegramId } = req.params;
+    if (!telegramId) {
+      res.status(400).json({ error: "telegramId обязателен" });
+      return;
+    }
+
+    const user = await User.findOne({ telegramId }).select("_id");
+    if (!user?._id) {
+      res.status(404).json({ error: "Пользователь не найден" });
+      return;
+    }
+
+    const result = await MonetizationService.canUserSearch(String(user._id));
+    res.status(200).json(result);
+  } catch (error) {
+    res.status(500).json({ error: "Ошибка при проверке возможности поиска" });
+  }
+};
+
+export const getSearchLimits = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
+  try {
+    const { telegramId } = req.params;
+    if (!telegramId) {
+      res.status(400).json({ error: "telegramId обязателен" });
+      return;
+    }
+
+    const user = await User.findOne({ telegramId }).select("_id");
+    if (!user?._id) {
+      res.status(404).json({ error: "Пользователь не найден" });
+      return;
+    }
+
+    const limits = await MonetizationService.getSearchLimits(String(user._id));
+    if (!limits) {
+      res.status(500).json({ error: "Не удалось получить лимиты" });
+      return;
+    }
+
+    res.status(200).json(limits);
+  } catch (error) {
+    res.status(500).json({ error: "Ошибка при получении лимитов поиска" });
+  }
+};
+
 
 export const createOrUpdateUser = async (req: Request, res: Response): Promise<void> => {
   try {

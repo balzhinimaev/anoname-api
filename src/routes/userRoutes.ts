@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Маршруты для управления пользователями
  * @module routes/users
  */
@@ -489,3 +489,15 @@ router.put('/me/profile-photo', authMiddleware as express.RequestHandler, [
     res.status(500).json({ error: 'Failed to update profile photo' });
   }
 });
+
+router.get(
+  "/:telegramId/can-search",
+  ensureOwnerOrAdminByParam as express.RequestHandler,
+  userController.canSearch as express.RequestHandler
+);
+
+router.get(
+  "/:telegramId/search-limits",
+  ensureOwnerOrAdminByParam as express.RequestHandler,
+  userController.getSearchLimits as express.RequestHandler
+);
