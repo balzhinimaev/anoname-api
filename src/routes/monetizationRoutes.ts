@@ -91,14 +91,12 @@ router.get('/items', getPurchaseItems);
  *             type: object
  *             required:
  *               - itemKey
- *               - paymentData
  *             properties:
  *               itemKey:
  *                 type: string
- *                 example: "boosts_1"
- *               paymentData:
- *                 type: object
- *                 example: { "payment_id": "12345", "amount": 59 }
+ *                 enum: ["premium_1day", "premium_7days", "premium_forever", "boosts_1", "boosts_5"]
+ *                 example: "premium_1day"
+ *                 description: "Ключ товара для покупки"
  *     responses:
  *       200:
  *         description: Покупка успешна

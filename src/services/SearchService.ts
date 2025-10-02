@@ -578,12 +578,25 @@ export class SearchService {
             search2Id: search2._id.toString(),
           });
 
+          // Получаем дополнительную информацию о пользователях для уведомлений
+          const [user1Data, user2Data] = await Promise.all([
+            User.findById(search1.userId).select('rating username firstName lastName profilePhoto photos subscription').lean(),
+            User.findById(search2.userId).select('rating username firstName lastName profilePhoto photos subscription').lean()
+          ]);
+
           // Уведомления пользователям (вне транзакции)
           wsManager.sendToUser(String(search1.userId), 'search:matched', {
             matchedUser: {
               telegramId: search2.telegramId,
               gender: search2.gender,
               age: search2.age,
+              rating: user2Data?.rating || 0,
+              username: user2Data?.username,
+              firstName: user2Data?.firstName,
+              lastName: user2Data?.lastName,
+              profilePhoto: user2Data?.profilePhoto,
+              photos: user2Data?.photos,
+              isPremium: !!(user2Data?.subscription?.isActive && user2Data?.subscription?.type && user2Data?.subscription?.type !== 'basic'),
               chatId: createdChat._id.toString()
             }
           });
@@ -592,6 +605,13 @@ export class SearchService {
               telegramId: search1.telegramId,
               gender: search1.gender,
               age: search1.age,
+              rating: user1Data?.rating || 0,
+              username: user1Data?.username,
+              firstName: user1Data?.firstName,
+              lastName: user1Data?.lastName,
+              profilePhoto: user1Data?.profilePhoto,
+              photos: user1Data?.photos,
+              isPremium: !!(user1Data?.subscription?.isActive && user1Data?.subscription?.type && user1Data?.subscription?.type !== 'basic'),
               chatId: createdChat._id.toString()
             }
           });

@@ -11,6 +11,13 @@ export interface ServerToClientEvents {
       telegramId: string;
       gender: 'male' | 'female';
       age: number;
+      rating: number;
+      username?: string;
+      firstName?: string;
+      lastName?: string;
+      profilePhoto?: string;
+      photos?: string[];
+      isPremium: boolean;
       chatId: string;
     };
   }) => void;
@@ -94,7 +101,9 @@ export interface ServerToClientEvents {
       username?: string;
       firstName?: string;
       lastName?: string;
+      profilePhoto?: string;
       photos?: string[];
+      isPremium?: boolean;
       chatId: string;
     }
   }) => void;

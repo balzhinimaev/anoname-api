@@ -14,7 +14,8 @@
     "create-test-user": "ts-node src/scripts/createTestUser.ts",
     "test-websocket": "ts-node src/scripts/testWebSocket.ts",
     "test-telegram-notifications": "ts-node src/scripts/testTelegramNotifications.ts",
-    "migrate-leads": "ts-node src/scripts/migrateLeadsFromFile.ts"
+    "migrate-leads": "ts-node src/scripts/migrateLeadsFromFile.ts",
+    "find-orphan-leads": "ts-node scripts/findOrphanLeads.ts"
   },
   "keywords": [],
   "author": "",

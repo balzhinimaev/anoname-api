@@ -34,10 +34,10 @@ export const SUBSCRIPTION_TIERS: Record<string, SubscriptionTier> = {
       analytics: false
     }
   },
-  premium: {
+  premium_1day: {
     type: 'premium',
-    price: 10, // рублей/месяц
-    duration: 30,
+    price: 10,
+    duration: 1, // 1 день
     features: {
       unlimitedSearches: true,
       advancedFilters: true,
@@ -45,7 +45,28 @@ export const SUBSCRIPTION_TIERS: Record<string, SubscriptionTier> = {
       analytics: true
     }
   },
-  // Удалён тариф gold — оставлен один платный тариф premium
+  premium_7days: {
+    type: 'premium',
+    price: 249,
+    duration: 7, // 7 дней
+    features: {
+      unlimitedSearches: true,
+      advancedFilters: true,
+      priorityInSearch: true,
+      analytics: true
+    }
+  },
+  premium_forever: {
+    type: 'premium',
+    price: 699,
+    duration: -1, // -1 означает навсегда
+    features: {
+      unlimitedSearches: true,
+      advancedFilters: true,
+      priorityInSearch: true,
+      analytics: true
+    }
+  }
 };
 
 export interface PurchaseItem {
@@ -58,7 +79,9 @@ export interface PurchaseItem {
 export const PURCHASE_ITEMS: Record<string, PurchaseItem> = {
   boosts_1: { type: 'boosts', amount: 1, price: 99 },
   boosts_5: { type: 'boosts', amount: 5, price: 399 },
-  premium: { type: 'subscription', subscriptionType: 'premium', price: 10 }
+  premium_1day: { type: 'subscription', subscriptionType: 'premium', price: 10 },
+  premium_7days: { type: 'subscription', subscriptionType: 'premium', price: 249 },
+  premium_forever: { type: 'subscription', subscriptionType: 'premium', price: 699 }
 };
 
 export class MonetizationService {
@@ -95,6 +118,7 @@ export class MonetizationService {
     const current = await User.findById(userId).lean<IUser>();
     if (!current) return null;
 
+    // Проверяем срок действия подписки только если есть endDate (не навсегда)
     if (
       current.subscription?.isActive &&
       current.subscription.endDate &&
@@ -176,39 +200,40 @@ export class MonetizationService {
   /**
    * Совершает покупку
    */
-  static async makePurchase(userId: string, itemKey: string, paymentData: any): Promise<{ success: boolean; message?: string; redirectUrl?: string; paymentId?: string }> {
+  static async makePurchase(userId: string, itemKey: string): Promise<{ success: boolean; message?: string; redirectUrl?: string; paymentId?: string }> {
     const item = PURCHASE_ITEMS[itemKey];
     if (!item) {
       return { success: false, message: 'Товар не найден' };
     }
 
-    // Создаем платёж в YooKassa (тест/продакшн)
-    // Сбор данных для чека (54-ФЗ): требуются контакт покупателя и позиция
-    const customerEmail: string | undefined = paymentData?.customer?.email;
-    const customerPhone: string | undefined = paymentData?.customer?.phone;
-    const vatCode: number = typeof paymentData?.vatCode === 'number' ? paymentData.vatCode : 1; // по умолчанию без НДС
-    const taxSystemCode: number | undefined = paymentData?.taxSystemCode; // опционально
-
-    if (!customerEmail && !customerPhone) {
-      return { success: false, message: 'Укажите email или phone покупателя для формирования чека' };
+    // Получаем данные пользователя для формирования чека
+    const user = await User.findById(userId).lean<IUser>();
+    if (!user) {
+      return { success: false, message: 'Пользователь не найден' };
     }
+
+    // Формируем данные покупателя для чека (YooKassa требует email или телефон)
+    const customerFullName = (user.firstName && user.lastName)
+      ? `${user.firstName} ${user.lastName}`
+      : (user.firstName || user.username || `User ${user.telegramId}`);
+    // В модели нет телефона/email, поэтому используем технический email на основе Telegram
+    const customerEmail = `${user.username ? user.username : `tg_${user.telegramId}`}@noemail.local`;
 
     const receipt: any = {
       customer: {
-        ...(customerEmail ? { email: customerEmail } : {}),
-        ...(customerPhone ? { phone: customerPhone } : {})
+        full_name: customerFullName,
+        email: customerEmail
       },
       items: [
         {
           description: item.type === 'subscription' ? 'Подписка Premium' : 'Внутренняя валюта',
           quantity: '1.00',
           amount: { value: item.price.toFixed(2), currency: 'RUB' },
-          vat_code: vatCode,
+          vat_code: 1, // без НДС
           payment_mode: 'full_payment',
           payment_subject: item.type === 'subscription' ? 'service' : 'commodity'
         }
-      ],
-      ...(typeof taxSystemCode === 'number' ? { tax_system_code: taxSystemCode } : {})
+      ]
     };
 
     const paymentResult = await this.processPayment(item.price, `${item.type}:${itemKey}`, { userId, itemKey }, receipt);
@@ -236,8 +261,20 @@ export class MonetizationService {
       if (!item.subscriptionType || item.subscriptionType !== 'premium') {
         return { success: false, message: 'Неверный тип подписки' };
       }
-      await this.activateSubscription(userId, 'premium');
-      return { success: true, message: `Подписка ${item.subscriptionType} активирована!` };
+      
+      // Определяем тип подписки по itemKey
+      let subscriptionTier = 'premium_1day'; // по умолчанию
+      if (itemKey === 'premium_7days') subscriptionTier = 'premium_7days';
+      else if (itemKey === 'premium_forever') subscriptionTier = 'premium_forever';
+      
+      await this.activateSubscription(userId, subscriptionTier);
+      
+      const tier = SUBSCRIPTION_TIERS[subscriptionTier];
+      const durationText = tier.duration === -1 ? 'навсегда' : 
+                          tier.duration === 1 ? 'на 1 день' : 
+                          `на ${tier.duration} дней`;
+      
+      return { success: true, message: `Подписка Premium ${durationText} активирована!` };
     } else {
       if (!item.amount) {
         return { success: false, message: 'Неверное количество валюты' };
@@ -250,24 +287,38 @@ export class MonetizationService {
   /**
    * Активирует подписку
    */
-  private static async activateSubscription(userId: string, type: 'premium'): Promise<void> {
-    const tier = SUBSCRIPTION_TIERS[type];
+  private static async activateSubscription(userId: string, tierKey: string): Promise<void> {
+    const tier = SUBSCRIPTION_TIERS[tierKey];
+    if (!tier) {
+      throw new Error(`Неизвестный тип подписки: ${tierKey}`);
+    }
+
     const now = new Date();
     let startDate = now;
-    let endDate = new Date(now.getTime() + tier.duration * 24 * 60 * 60 * 1000);
+    let endDate: Date | null = null;
+
+    // Для подписки навсегда (duration = -1) не устанавливаем endDate
+    if (tier.duration === -1) {
+      endDate = null; // навсегда
+    } else {
+      endDate = new Date(now.getTime() + tier.duration * 24 * 60 * 60 * 1000);
+    }
 
     // Если подписка уже активна и не просрочена — продлеваем от текущей даты окончания
     try {
       const current = await User.findById(userId).lean<IUser>();
       if (current?.subscription?.isActive && current.subscription.endDate && current.subscription.endDate.getTime() > now.getTime()) {
         startDate = current.subscription.startDate || startDate;
-        endDate = new Date(current.subscription.endDate.getTime() + tier.duration * 24 * 60 * 60 * 1000);
+        // Для подписки навсегда не продлеваем, а заменяем
+        if (tier.duration !== -1) {
+          endDate = new Date(current.subscription.endDate.getTime() + tier.duration * 24 * 60 * 60 * 1000);
+        }
       }
     } catch {}
 
     await User.findByIdAndUpdate(userId, {
       subscription: {
-        type,
+        type: tier.type,
         startDate,
         endDate,
         isActive: true,
@@ -276,9 +327,14 @@ export class MonetizationService {
       'limits.canUseAdvancedFilters': tier.features.advancedFilters
     });
 
-    wsLogger.info('subscription_activated', `Подписка ${type} активирована для пользователя ${userId}`, {
+    const durationText = tier.duration === -1 ? 'навсегда' : 
+                        tier.duration === 1 ? 'на 1 день' : 
+                        `на ${tier.duration} дней`;
+
+    wsLogger.info('subscription_activated', `Подписка ${tier.type} ${durationText} активирована для пользователя ${userId}`, {
       userId,
-      subscriptionType: type,
+      subscriptionType: tier.type,
+      tierKey,
       endDate
     });
   }
@@ -439,8 +495,20 @@ export class MonetizationService {
       if (!item.subscriptionType || item.subscriptionType !== 'premium') {
         return { success: false, message: 'Неверный тип подписки' };
       }
-      await this.activateSubscription(userId, 'premium');
-      return { success: true, message: `Подписка ${item.subscriptionType} активирована!` };
+      
+      // Определяем тип подписки по itemKey
+      let subscriptionTier = 'premium_1day'; // по умолчанию
+      if (itemKey === 'premium_7days') subscriptionTier = 'premium_7days';
+      else if (itemKey === 'premium_forever') subscriptionTier = 'premium_forever';
+      
+      await this.activateSubscription(userId, subscriptionTier);
+      
+      const tier = SUBSCRIPTION_TIERS[subscriptionTier];
+      const durationText = tier.duration === -1 ? 'навсегда' : 
+                          tier.duration === 1 ? 'на 1 день' : 
+                          `на ${tier.duration} дней`;
+      
+      return { success: true, message: `Подписка Premium ${durationText} активирована!` };
     } else {
       if (!item.amount) {
         return { success: false, message: 'Неверное количество валюты' };

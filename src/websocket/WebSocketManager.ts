@@ -143,9 +143,9 @@ export class WebSocketManager {
         };
 
         // Попробуем отдать минимальные данные собеседника для гидратации UI
-        // Берем из User: telegramId, gender, age, rating, username/имя/фото
+        // Берем из User: telegramId, gender, age, rating, username/имя/фото, премиум статус
         try {
-          const other = await User.findById(otherParticipant).select('telegramId gender age rating username firstName lastName photos');
+          const other = await User.findById(otherParticipant).select('telegramId gender age rating username firstName lastName profilePhoto photos subscription');
           if (other) {
             matchedUser = {
               telegramId: String(other.telegramId),
@@ -155,7 +155,9 @@ export class WebSocketManager {
               username: other.username,
               firstName: other.firstName,
               lastName: other.lastName,
+              profilePhoto: other.profilePhoto,
               photos: other.photos,
+              isPremium: !!(other.subscription?.isActive && other.subscription?.type && other.subscription?.type !== 'basic'),
               chatId
             };
           }

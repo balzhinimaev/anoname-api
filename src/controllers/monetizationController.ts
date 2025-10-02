@@ -95,14 +95,14 @@ export const makePurchase = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const { itemKey, paymentData } = req.body;
+    const { itemKey } = req.body;
     
-    if (!itemKey || !paymentData) {
-      res.status(400).json({ error: 'Необходимо указать товар и данные платежа' });
+    if (!itemKey) {
+      res.status(400).json({ error: 'Необходимо указать товар' });
       return;
     }
 
-    const result = await MonetizationService.makePurchase(userId, itemKey, paymentData);
+    const result = await MonetizationService.makePurchase(userId, itemKey);
     if (!result.success) {
       res.status(400).json({ success: false, error: result.message || 'Ошибка обработки платежа' });
       return;
