@@ -103,8 +103,31 @@ describe('LeadCampaignService.countSegmentLeads', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     const [filter] = spy.mock.calls[0] as [any];
 
-    expect(filter).not.toHaveProperty('isRegistered');
+    expect(filter).toHaveProperty('isRegistered', false);
     expect(filter).toHaveProperty('$or');
+  });
+});
+
+describe('LeadCampaignService.buildSegmentFilter (registered-only segments)', () => {
+  it('demonstrates how registered-only segments can opt out of the restriction', () => {
+    const buildSegmentFilter: (segment: string) => any = (LeadCampaignService as any)
+      .buildSegmentFilter.bind(LeadCampaignService);
+
+    const originalIncludes = Array.prototype.includes;
+    const includesSpy = jest
+      .spyOn(Array.prototype, 'includes')
+      .mockImplementation(function (this: any, searchElement: any, ...args: any[]) {
+        if (Array.isArray(this) && this.length === 0 && searchElement === 'registered_only_segment') {
+          return true;
+        }
+        return originalIncludes.apply(this, [searchElement, ...args]);
+      });
+
+    const filter = buildSegmentFilter('registered_only_segment');
+
+    expect(filter).not.toHaveProperty('isRegistered');
+
+    includesSpy.mockRestore();
   });
 });
 
