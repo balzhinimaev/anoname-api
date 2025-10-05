@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import User from '../models/User';
 import Prelaunch from '../models/Prelaunch';
 import Lead from '../models/Lead';
+import { LeadService } from '../services/LeadService';
 import LeadCampaignService from '../services/LeadCampaignService';
 
 export const searchUsers = async (req: Request, res: Response): Promise<void> => {
@@ -122,9 +123,8 @@ export const exportPrelaunchCsv = async (_req: Request, res: Response): Promise<
 
 export const getLeadStats = async (_req: Request, res: Response): Promise<void> => {
   try {
-    const total = await Lead.countDocuments({});
-    const registered = await Lead.countDocuments({ isRegistered: true });
-    res.json({ total, registered, unregistered: total - registered });
+    const stats = await LeadService.getStats();
+    res.json(stats);
   } catch (e) {
     res.status(500).json({ error: 'Не удалось получить статистику лидов' });
   }

@@ -20,6 +20,113 @@ const generateDeviceId = (telegramId: string, userAgent: string) => {
     .digest('hex');
 };
 
+const extractCampaignFromStartPayload = (input: unknown): { campaign?: string; campaignId?: string } => {
+  if (input === null || input === undefined) {
+    return {};
+  }
+
+  if (typeof input === 'object' && !Array.isArray(input)) {
+    const obj = input as Record<string, unknown>;
+    const directCampaign = typeof obj.campaign === 'string'
+      ? obj.campaign
+      : typeof obj.campaignCode === 'string'
+        ? obj.campaignCode
+        : typeof (obj as Record<string, unknown>)['campaign_code'] === 'string'
+          ? String((obj as Record<string, unknown>)['campaign_code'])
+          : typeof obj.code === 'string'
+            ? obj.code
+            : undefined;
+    const directCampaignId = typeof obj.campaignId === 'string'
+      ? obj.campaignId
+      : typeof (obj as Record<string, unknown>)['campaign_id'] === 'string'
+        ? String((obj as Record<string, unknown>)['campaign_id'])
+        : undefined;
+
+    const nestedSources: unknown[] = [
+      obj.payload,
+      obj.startPayload,
+      obj.startAppPayload,
+      obj.startapp,
+      obj.startParam,
+      obj.start_param,
+      obj.startParams
+    ];
+
+    let nestedCampaign: string | undefined;
+    let nestedCampaignId: string | undefined;
+
+    for (const source of nestedSources) {
+      if (source === undefined || source === null) {
+        continue;
+      }
+      const parsed = extractCampaignFromStartPayload(source);
+      if (!nestedCampaign && parsed.campaign) {
+        nestedCampaign = parsed.campaign;
+      }
+      if (!nestedCampaignId && parsed.campaignId) {
+        nestedCampaignId = parsed.campaignId;
+      }
+      if (nestedCampaign && nestedCampaignId) {
+        break;
+      }
+    }
+
+    return {
+      campaign: directCampaign ?? nestedCampaign,
+      campaignId: directCampaignId ?? nestedCampaignId
+    };
+  }
+
+  if (typeof input !== 'string') {
+    return {};
+  }
+
+  let raw = input.trim();
+  if (!raw) {
+    return {};
+  }
+
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {}
+
+  if (raw.startsWith('{') && raw.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return extractCampaignFromStartPayload(parsed as Record<string, unknown>);
+      }
+    } catch {}
+  }
+
+  const paramMatch = raw.match(/start(?:app|_param)=([^&]+)/i);
+  if (paramMatch) {
+    raw = paramMatch[1];
+  }
+
+  const leadIndex = raw.toLowerCase().indexOf('lead');
+  if (leadIndex >= 0) {
+    raw = raw.slice(leadIndex);
+  }
+
+  raw = raw.replace(/^lead[:_\-]?/i, '');
+  const parts = raw.split(/[_:\-]/).filter(Boolean);
+  if (parts.length === 0) {
+    return {};
+  }
+
+  const campaignCandidate = parts[0]?.trim();
+  if (!campaignCandidate) {
+    return {};
+  }
+
+  const campaignIdCandidate = /^[0-9a-fA-F]{24}$/.test(campaignCandidate) ? campaignCandidate : undefined;
+  return {
+    campaign: campaignCandidate,
+    campaignId: campaignIdCandidate
+  };
+};
+
 const createAndSaveToken = async (
   user: any,
   req: Request,
@@ -78,6 +185,32 @@ export const register = async (req: Request, res: Response): Promise<void> => {
     let campaign: string | undefined = typeof userData.campaign === 'string' && userData.campaign.trim() !== ''
       ? userData.campaign.trim()
       : (campaignFromReferral || undefined);
+    let campaignId: string | undefined = typeof userData.campaignId === 'string' && userData.campaignId.trim() !== ''
+      ? userData.campaignId.trim()
+      : undefined;
+
+    const applyCampaignFromPayload = (value: unknown) => {
+      if (value === undefined || value === null) {
+        return;
+      }
+      const parsed = extractCampaignFromStartPayload(value);
+      if (parsed.campaign && (!campaign || campaign.trim() === '')) {
+        campaign = parsed.campaign.trim();
+      }
+      if (parsed.campaignId && (!campaignId || campaignId.trim() === '')) {
+        campaignId = parsed.campaignId.trim();
+      }
+    };
+
+    [
+      userData.startPayload,
+      userData.startAppPayload,
+      userData.startapp,
+      userData.startParam,
+      userData.start_param,
+      userData.startParams,
+      userData.payload
+    ].forEach((value) => applyCampaignFromPayload(value));
     const userAgent = String(req.headers['user-agent'] || '');
 
     // Лог: попытка регистрации
@@ -91,7 +224,9 @@ export const register = async (req: Request, res: Response): Promise<void> => {
       ip: req.ip,
       userAgent,
       hasCampaign: Boolean(campaign),
-      campaign
+      campaign,
+      hasCampaignId: Boolean(campaignId),
+      campaignId
     });
     // Telegram WebApp initData verification (обязательная, если включено требование или если initData передан)
     if (config.requireTgInitData || userData.initData) {
@@ -123,11 +258,14 @@ export const register = async (req: Request, res: Response): Promise<void> => {
       // Fallback: извлекаем start_param из initData, если referralCode/campaign не пришли явно
       try {
         const startParamRaw = (verification as any)?.raw?.start_param as string | undefined;
-        if ((!referralCode || !campaign) && startParamRaw) {
-          const decoded = decodeURIComponent(startParamRaw);
-          const parts = decoded.split('__');
-          if (!referralCode && parts[0]) referralCode = parts[0].trim().toUpperCase();
-          if (!campaign && parts.length > 1) campaign = parts.slice(1).join('__').trim();
+        if (startParamRaw) {
+          if (!referralCode || !campaign) {
+            const decoded = decodeURIComponent(startParamRaw);
+            const parts = decoded.split('__');
+            if (!referralCode && parts[0]) referralCode = parts[0].trim().toUpperCase();
+            if (!campaign && parts.length > 1) campaign = parts.slice(1).join('__').trim();
+          }
+          applyCampaignFromPayload(startParamRaw);
         }
       } catch {}
     }
@@ -202,7 +340,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
         telegramId: String(user.telegramId),
         cohort: user.cohort as any,
         name: 'register',
-        props: { platform, campaign },
+        props: { platform, campaign, campaignId },
         userAgent: String(req.headers['user-agent'] || ''),
         ip: req.ip
       } as any);
@@ -212,7 +350,9 @@ export const register = async (req: Request, res: Response): Promise<void> => {
       type: 'auth_register_success',
       userId: String((user as any)._id),
       telegramId: user.telegramId,
-      hasReferralCode: Boolean(referralCode)
+      hasReferralCode: Boolean(referralCode),
+      campaign,
+      campaignId
     });
 
     // Отправляем уведомление в Telegram канал о регистрации
@@ -228,6 +368,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
         profilePhoto: user.profilePhoto,
         cohort: user.cohort,
         campaign: campaign,
+        campaignId: campaignId,
         referralCode: referralCode,
         platform: platform,
         userAgent: String(req.headers['user-agent'] || ''),
@@ -260,9 +401,10 @@ export const register = async (req: Request, res: Response): Promise<void> => {
     try { await PrelaunchService.join(String((user as any)._id)); } catch {}
 
     // Обновляем статус лида как зарегистрированного
-    try { 
+    try {
       const { LeadService } = await import('../services/LeadService');
-      await LeadService.markAsRegistered(String(user.telegramId)); 
+      await LeadService.markAsRegistered(String(user.telegramId));
+      await LeadService.assignCampaign(String(user.telegramId), campaign ?? null, campaignId ?? null);
     } catch {}
   } catch (error) {
     logger.error('auth_register_exception', { message: (error as Error)?.message });
