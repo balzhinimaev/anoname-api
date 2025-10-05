@@ -11,6 +11,9 @@ export interface ILead extends Document {
   viewedPrelaunchStatsAt?: Date;
   tmaOpenedAt?: Date | null;
   unsubscribedAt?: Date | null;
+  tmaPayload?: Record<string, unknown> | string | null;
+  payload?: Record<string, unknown> | string | null;
+  campaign?: string | null;
   campaignId?: mongoose.Types.ObjectId | null;
   campaignStatus: LeadCampaignStatus;
   campaignStatusUpdatedAt?: Date;
@@ -27,6 +30,9 @@ const LeadSchema: Schema<ILead> = new Schema({
   viewedPrelaunchStatsAt: { type: Date },
   tmaOpenedAt: { type: Date, index: true },
   unsubscribedAt: { type: Date, index: true },
+  tmaPayload: { type: Schema.Types.Mixed },
+  payload: { type: Schema.Types.Mixed },
+  campaign: { type: String, index: true },
   campaignId: { type: Schema.Types.ObjectId, ref: 'LeadCampaign', index: true },
   campaignStatus: {
     type: String,

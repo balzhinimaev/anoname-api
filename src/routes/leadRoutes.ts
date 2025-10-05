@@ -1,6 +1,6 @@
 import express from 'express';
 import { botAuth } from '../middleware/botAuth';
-import { addLead, getStats } from '../controllers/leadController';
+import { addLead, getStats, recordTmaOpen } from '../controllers/leadController';
 
 export const router = express.Router();
 
@@ -9,6 +9,9 @@ router.use(botAuth);
 
 // Добавить лида
 router.post('/add', addLead);
+
+// Зафиксировать открытие TMA
+router.post('/tma-open', recordTmaOpen);
 
 // Получить статистику лидов
 router.get('/stats', getStats);

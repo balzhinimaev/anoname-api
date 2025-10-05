@@ -39,6 +39,42 @@ X-Bot-Secret: <your-bot-backend-secret>
 - `401 Unauthorized` - неверный секрет
 - `500 Internal Server Error` - ошибка сервера
 
+## POST /api/leads/tma-open
+
+Фиксирует факт открытия Telegram Mini App из кампаний и обновляет связанные данные лида.
+
+### Аутентификация
+Требуется заголовок `X-Bot-Secret` с секретом из `BOT_BACKEND_SECRET`.
+
+### Тело запроса
+```json
+{
+  "telegramId": "123456789",
+  "campaignId": "65fd2d1a6f2c3b0a2e4f9876",
+  "campaign": "WELCOME",
+  "payload": "lead_WELCOME_123456789"
+}
+```
+
+### Ответ
+
+```json
+{
+  "success": true,
+  "created": false,
+  "leadId": "6654ab1c0f2e9b456789abcd",
+  "telegramId": "123456789",
+  "campaign": "WELCOME",
+  "campaignId": "65fd2d1a6f2c3b0a2e4f9876",
+  "tmaOpenedAt": "2024-05-11T09:20:35.000Z"
+}
+```
+
+#### Ошибки:
+- `400 Bad Request` – отсутствует обязательный `telegramId`
+- `401 Unauthorized` – неверный секрет
+- `500 Internal Server Error` – внутренняя ошибка сервера
+
 ## GET /api/leads/stats
 
 Получает статистику лидов.

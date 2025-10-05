@@ -17,6 +17,7 @@ export interface UserRegistrationData {
   profilePhoto?: string;
   cohort?: 'A' | 'B';
   campaign?: string;
+  campaignId?: string;
   referralCode?: string;
   platform: string;
   userAgent?: string;
@@ -192,6 +193,7 @@ export class TelegramNotificationService {
 • Платформа: ${platform}
 • Когорта: ${cohort}
 • Кампания: ${userData.campaign || 'Не указана'}
+• ID кампании: ${userData.campaignId || 'Не указан'}
 • Реферальный код: ${userData.referralCode || 'Не указан'}
 
 🌐 <b>Техническая информация:</b>
