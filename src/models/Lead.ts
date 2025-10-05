@@ -9,6 +9,8 @@ export interface ILead extends Document {
   prelaunched?: boolean;
   viewedPrelaunchStats?: boolean;
   viewedPrelaunchStatsAt?: Date;
+  tmaOpenedAt?: Date | null;
+  unsubscribedAt?: Date | null;
   campaignId?: mongoose.Types.ObjectId | null;
   campaignStatus: LeadCampaignStatus;
   campaignStatusUpdatedAt?: Date;
@@ -23,6 +25,8 @@ const LeadSchema: Schema<ILead> = new Schema({
   prelaunched: { type: Boolean, default: false, index: true },
   viewedPrelaunchStats: { type: Boolean, default: false, index: true },
   viewedPrelaunchStatsAt: { type: Date },
+  tmaOpenedAt: { type: Date, index: true },
+  unsubscribedAt: { type: Date, index: true },
   campaignId: { type: Schema.Types.ObjectId, ref: 'LeadCampaign', index: true },
   campaignStatus: {
     type: String,
