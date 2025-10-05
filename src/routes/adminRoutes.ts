@@ -1,6 +1,23 @@
 import express from 'express';
 import { authMiddleware, requireAdmin } from '../middleware/authMiddleware';
-import { searchUsers, getUserById, getPrelaunchStats, getPrelaunchList, exportPrelaunchCsv, getLeadStats, getLeadList, exportLeadCsv } from '../controllers/adminController';
+import { botAuth } from '../middleware/botAuth';
+import {
+  searchUsers,
+  getUserById,
+  getPrelaunchStats,
+  getPrelaunchList,
+  exportPrelaunchCsv,
+  getLeadStats,
+  getLeadList,
+  exportLeadCsv,
+  listLeadCampaigns,
+  createLeadCampaign,
+  getLeadCampaignById,
+  updateLeadCampaign,
+  deleteLeadCampaign,
+  previewLeadCampaign,
+  launchLeadCampaign,
+} from '../controllers/adminController';
 
 export const router = express.Router();
 
@@ -22,6 +39,15 @@ router.get('/prelaunch/export.csv', exportPrelaunchCsv as any);
 router.get('/leads/stats', getLeadStats as any);
 router.get('/leads/list', getLeadList as any);
 router.get('/leads/export.csv', exportLeadCsv as any);
+
+// Лид-кампании
+router.get('/leads/campaigns', listLeadCampaigns as any);
+router.get('/leads/campaigns/:id', getLeadCampaignById as any);
+router.get('/leads/campaigns/:id/preview', previewLeadCampaign as any);
+router.post('/leads/campaigns', botAuth as any, createLeadCampaign as any);
+router.put('/leads/campaigns/:id', botAuth as any, updateLeadCampaign as any);
+router.delete('/leads/campaigns/:id', botAuth as any, deleteLeadCampaign as any);
+router.post('/leads/campaigns/:id/launch', botAuth as any, launchLeadCampaign as any);
 
 export default router;
 
