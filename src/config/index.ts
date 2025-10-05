@@ -2,6 +2,17 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+const parsePositiveInt = (value: string | undefined, fallback: number): number => {
+  if (value === undefined) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return Math.floor(parsed);
+};
+
 export default {
   mongoUri: process.env.MONGODB_URI || 'mongodb://localhost:27017/telegram-dating',
   jwtSecret: (() => {
@@ -17,6 +28,7 @@ export default {
   clientUrl: process.env.CLIENT_URL || 'http://localhost:3000',
   // Telegram Bot API
   botToken: process.env.BOT_TOKEN || '',
+  botUsername: process.env.BOT_USERNAME || '',
   botBackendSecret: process.env.BOT_BACKEND_SECRET || '',
   // Требовать initData на бэке (аналог фронтового VITE_REQUIRE_TG_INITDATA)
   requireTgInitData: (process.env.REQUIRE_TG_INITDATA || 'false').toLowerCase() === 'true',
@@ -85,6 +97,20 @@ export default {
     if (!key) return false;
     return this.serviceApiKeys.has(String(key));
   },
+  leadBroadcast: {
+    queueName: process.env.LEAD_BROADCAST_QUEUE_NAME || 'lead-broadcast',
+    redisUrl: process.env.LEAD_BROADCAST_REDIS_URL || process.env.REDIS_URL || '',
+    redisKeyPrefix: process.env.LEAD_BROADCAST_REDIS_KEY_PREFIX || 'lead_broadcast',
+    limits: {
+      perSecond: parsePositiveInt(process.env.LEAD_BROADCAST_LIMIT_PER_SECOND, 1),
+      perMinute: parsePositiveInt(process.env.LEAD_BROADCAST_LIMIT_PER_MINUTE, 20),
+      perHour: parsePositiveInt(process.env.LEAD_BROADCAST_LIMIT_PER_HOUR, 500),
+      perDay: parsePositiveInt(process.env.LEAD_BROADCAST_LIMIT_PER_DAY, 5000),
+    },
+    retryDelayMs: parsePositiveInt(process.env.LEAD_BROADCAST_RETRY_DELAY_MS, 15_000),
+    maxAttempts: Math.max(1, parsePositiveInt(process.env.LEAD_BROADCAST_MAX_ATTEMPTS, 3)),
+    maxDeferrals: Math.max(1, parsePositiveInt(process.env.LEAD_BROADCAST_MAX_DEFERRALS, 10)),
+  },
   yookassa: {
     mode: process.env.YOOKASSA_MODE || 'test',
     shopIdTest: process.env.YOOKASSA_SHOP_ID_TEST || '',
@@ -94,4 +120,4 @@ export default {
     webhookUser: process.env.YOOKASSA_WEBHOOK_USER || '',
     webhookPassword: process.env.YOOKASSA_WEBHOOK_PASSWORD || ''
   }
-}; 
+};
