@@ -1,5 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
+export type LeadCampaignStatus = 'idle' | 'queued' | 'sent' | 'failed' | 'unsubscribed';
+
 export interface ILead extends Document {
   telegramId: string;
   createdAt: Date;
@@ -7,6 +9,11 @@ export interface ILead extends Document {
   prelaunched?: boolean;
   viewedPrelaunchStats?: boolean;
   viewedPrelaunchStatsAt?: Date;
+  campaignId?: mongoose.Types.ObjectId | null;
+  campaignStatus: LeadCampaignStatus;
+  campaignStatusUpdatedAt?: Date;
+  campaignLastSentAt?: Date | null;
+  campaignLastInteractionAt?: Date | null;
 }
 
 const LeadSchema: Schema<ILead> = new Schema({
@@ -15,7 +22,17 @@ const LeadSchema: Schema<ILead> = new Schema({
   isRegistered: { type: Boolean, default: false, index: true },
   prelaunched: { type: Boolean, default: false, index: true },
   viewedPrelaunchStats: { type: Boolean, default: false, index: true },
-  viewedPrelaunchStatsAt: { type: Date }
+  viewedPrelaunchStatsAt: { type: Date },
+  campaignId: { type: Schema.Types.ObjectId, ref: 'LeadCampaign', index: true },
+  campaignStatus: {
+    type: String,
+    enum: ['idle', 'queued', 'sent', 'failed', 'unsubscribed'],
+    default: 'idle',
+    index: true
+  },
+  campaignStatusUpdatedAt: { type: Date, default: Date.now, index: true },
+  campaignLastSentAt: { type: Date, index: true },
+  campaignLastInteractionAt: { type: Date, index: true }
 }, {
   timestamps: false
 });
