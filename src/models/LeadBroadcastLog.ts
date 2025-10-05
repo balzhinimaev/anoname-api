@@ -1,6 +1,6 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
-export type LeadBroadcastMethod = 'sendMessage' | 'sendWebhook';
+export type LeadBroadcastMethod = 'sendMessage';
 export type LeadBroadcastStatus = 'queued' | 'processing' | 'sent' | 'failed' | 'skipped';
 
 export interface ILeadBroadcastLog extends Document {
@@ -26,7 +26,7 @@ export interface ILeadBroadcastLog extends Document {
 const LeadBroadcastLogSchema = new Schema<ILeadBroadcastLog>({
   jobId: { type: String, required: true, index: true },
   telegramId: { type: String, required: true, index: true },
-  method: { type: String, enum: ['sendMessage', 'sendWebhook'], required: true, index: true },
+  method: { type: String, enum: ['sendMessage'], required: true, index: true },
   payload: { type: Schema.Types.Mixed, required: true },
   status: { type: String, enum: ['queued', 'processing', 'sent', 'failed', 'skipped'], required: true, index: true },
   attempts: { type: Number, default: 0 },

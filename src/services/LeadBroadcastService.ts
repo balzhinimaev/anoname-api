@@ -127,6 +127,10 @@ export class LeadBroadcastService {
       throw new Error('text is required');
     }
 
+    if (options?.extra !== undefined && typeof options.extra !== 'object') {
+      throw new Error('extra options must be an object when provided');
+    }
+
     await this.ready.catch(() => undefined);
 
     const payload = this.sanitizePayload({
@@ -138,24 +142,6 @@ export class LeadBroadcastService {
     });
 
     return this.enqueueJob('sendMessage', telegramId, payload);
-  }
-
-  public async enqueueWebhook(
-    telegramId: string,
-    data: Record<string, unknown>
-  ): Promise<ILeadBroadcastLog> {
-    if (!telegramId) {
-      throw new Error('telegramId is required');
-    }
-
-    await this.ready.catch(() => undefined);
-
-    const payload = this.sanitizePayload({
-      chat_id: String(telegramId),
-      ...data,
-    });
-
-    return this.enqueueJob('sendWebhook', telegramId, payload);
   }
 
   private async enqueueJob(
