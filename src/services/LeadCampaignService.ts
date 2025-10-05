@@ -472,7 +472,9 @@ export class LeadCampaignService {
       campaignStatus: { $ne: 'unsubscribed' },
     };
 
-    const segmentsAllowingRegistered: LeadCampaignSegment[] = ['all_leads'];
+    const segmentsAllowingRegistered: LeadCampaignSegment[] = [
+      // Add registered-only segments here once they are available.
+    ];
     const restrictToUnregistered = !segmentsAllowingRegistered.includes(segment);
 
     const withRegistrationFilter = restrictToUnregistered
