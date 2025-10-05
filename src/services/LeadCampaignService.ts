@@ -287,7 +287,7 @@ export class LeadCampaignService {
   }
 
   private static buildSegmentFilter(segment: LeadCampaignSegment): FilterQuery<ILead> {
-    const notUnsubscribed: FilterQuery<ILead> = {
+    const baseFilter: FilterQuery<ILead> = {
       $or: [
         { unsubscribedAt: { $exists: false } },
         { unsubscribedAt: null },
@@ -295,17 +295,21 @@ export class LeadCampaignService {
       campaignStatus: { $ne: 'unsubscribed' },
     };
 
+    const segmentsAllowingRegistered: LeadCampaignSegment[] = ['all_leads'];
+    const restrictToUnregistered = !segmentsAllowingRegistered.includes(segment);
+
+    const withRegistrationFilter = restrictToUnregistered
+      ? { ...baseFilter, isRegistered: false }
+      : baseFilter;
+
     switch (segment) {
       case 'all_leads':
-        return notUnsubscribed;
+        return withRegistrationFilter;
       case 'prelaunch_only':
-        return {
-          ...notUnsubscribed,
-          isRegistered: false,
-        };
+        return withRegistrationFilter;
       case 'inactive_7_days':
         return {
-          ...notUnsubscribed,
+          ...withRegistrationFilter,
           $and: [
             {
               $or: [
@@ -325,7 +329,7 @@ export class LeadCampaignService {
         };
       case 'inactive_30_days':
         return {
-          ...notUnsubscribed,
+          ...withRegistrationFilter,
           $and: [
             {
               $or: [
@@ -344,7 +348,7 @@ export class LeadCampaignService {
           ],
         };
       default:
-        return notUnsubscribed;
+        return withRegistrationFilter;
     }
   }
 
