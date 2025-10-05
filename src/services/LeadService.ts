@@ -99,9 +99,17 @@ export class LeadService {
 
   static async markAsRegistered(telegramId: string): Promise<boolean> {
     try {
+      const now = new Date();
       const result = await Lead.updateOne(
         { telegramId },
-        { $set: { isRegistered: true } }
+        {
+          $set: {
+            isRegistered: true,
+            campaignStatus: 'unsubscribed',
+            campaignStatusUpdatedAt: now,
+            unsubscribedAt: now,
+          },
+        }
       );
       const success = result.modifiedCount > 0;
       metricsCollector.leadRegistered(success);
