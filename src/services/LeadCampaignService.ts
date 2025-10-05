@@ -8,6 +8,8 @@ import LeadCampaign, {
 } from '../models/LeadCampaign';
 import Lead, { ILead } from '../models/Lead';
 import { LeadBroadcastService } from './LeadBroadcastService';
+import logger from '../utils/logger';
+import { metricsCollector } from '../utils/metrics';
 
 type CampaignInput = {
   name: string;
@@ -125,17 +127,28 @@ export class LeadCampaignService {
 
   static async launchCampaign(id: string, options: LaunchOptions = {}): Promise<LaunchResult> {
     if (!mongoose.isValidObjectId(id)) {
+      logger.warn('lead_campaign_launch_invalid_id', { campaignId: id });
       throw new Error('Campaign not found');
     }
 
     const campaign = await LeadCampaign.findById(id);
     if (!campaign) {
+      logger.warn('lead_campaign_launch_not_found', { campaignId: id });
       throw new Error('Campaign not found');
     }
 
     if (campaign.status === 'sending') {
+      logger.warn('lead_campaign_launch_already_in_progress', { campaignId: id });
       throw new Error('Campaign is already in progress');
     }
+
+    const isDryRun = Boolean(options.dryRun);
+    logger.info('lead_campaign_launch_attempt', {
+      campaignId: id,
+      dryRun: isDryRun,
+      segment: campaign.segment,
+      template: campaign.template,
+    });
 
     const filter = this.buildSegmentFilter(campaign.segment);
     const leads = await Lead.find(filter)
@@ -144,7 +157,13 @@ export class LeadCampaignService {
 
     const matched = leads.length;
 
+    metricsCollector.leadCampaignLaunchStarted(isDryRun);
+
     if (options.dryRun) {
+      logger.info('lead_campaign_launch_dry_run', {
+        campaignId: id,
+        matched,
+      });
       return {
         campaign,
         matched,
@@ -164,6 +183,9 @@ export class LeadCampaignService {
       campaign.status = 'sent';
       campaign.sentAt = now;
       await campaign.save();
+      logger.info('lead_campaign_launch_no_matches', {
+        campaignId: id,
+      });
       return {
         campaign,
         matched,
@@ -201,9 +223,22 @@ export class LeadCampaignService {
           metadata: campaign.metadata ?? {},
         });
         queued += 1;
+        metricsCollector.leadCampaignMessageQueued(true);
+        logger.debug('lead_campaign_enqueue_success', {
+          campaignId: id,
+          leadId: lead._id,
+          telegramId: lead.telegramId,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
         failedLeads.push({ leadId: String(lead._id), telegramId: lead.telegramId, error: message });
+        metricsCollector.leadCampaignMessageQueued(false);
+        logger.error('lead_campaign_enqueue_failed', {
+          campaignId: id,
+          leadId: lead._id,
+          telegramId: lead.telegramId,
+          error: message,
+        });
       }
     }
 
@@ -234,6 +269,13 @@ export class LeadCampaignService {
     campaign.status = queued > 0 ? 'sent' : 'cancelled';
     campaign.sentAt = queued > 0 ? new Date() : null;
     await campaign.save();
+
+    logger.info('lead_campaign_launch_completed', {
+      campaignId: id,
+      matched,
+      queued,
+      failed: failedLeads.length,
+    });
 
     return {
       campaign,

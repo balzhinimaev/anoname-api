@@ -2,6 +2,8 @@ import mongoose, { PipelineStage } from 'mongoose';
 import Lead, { ILead } from '../models/Lead';
 import User from '../models/User';
 import { TelegramNotificationService } from './TelegramNotificationService';
+import logger from '../utils/logger';
+import { metricsCollector } from '../utils/metrics';
 
 const { Types } = mongoose;
 
@@ -18,9 +20,12 @@ export interface LeadCampaignConversionStats {
 export class LeadService {
   static async addLead(telegramId: string): Promise<{ added: boolean; isNew: boolean }> {
     try {
+      logger.info('lead_add_attempt', { telegramId });
       const existingLead = await Lead.findOne({ telegramId });
 
       if (existingLead) {
+        metricsCollector.leadAddDuplicate();
+        logger.info('lead_add_duplicate', { telegramId });
         return { added: false, isNew: false };
       }
 
@@ -34,6 +39,9 @@ export class LeadService {
         isRegistered
       });
 
+      metricsCollector.leadAddCreated();
+      logger.info('lead_add_success', { telegramId, leadId: lead._id, isRegistered });
+
       // Send notification to Telegram channel
       try {
         await TelegramNotificationService.sendLeadNotification({
@@ -41,13 +49,25 @@ export class LeadService {
           isRegistered,
           createdAt: lead.createdAt
         });
+        metricsCollector.leadNotificationSent();
+        logger.info('lead_notification_sent', { telegramId, leadId: lead._id });
       } catch (notificationError) {
         // Log error but don't fail the lead creation
-        console.error('Failed to send lead notification:', notificationError);
+        metricsCollector.leadNotificationFailed();
+        logger.error('lead_notification_error', {
+          telegramId,
+          leadId: lead._id,
+          error: notificationError instanceof Error ? notificationError.message : String(notificationError)
+        });
       }
 
       return { added: true, isNew: true };
     } catch (error) {
+      metricsCollector.leadAddFailed();
+      logger.error('lead_add_error', {
+        telegramId,
+        error: error instanceof Error ? error.message : String(error)
+      });
       throw new Error('Failed to add lead');
     }
   }
@@ -83,8 +103,20 @@ export class LeadService {
         { telegramId },
         { $set: { isRegistered: true } }
       );
-      return result.modifiedCount > 0;
+      const success = result.modifiedCount > 0;
+      metricsCollector.leadRegistered(success);
+      if (success) {
+        logger.info('lead_mark_registered_success', { telegramId });
+      } else {
+        logger.debug('lead_mark_registered_noop', { telegramId });
+      }
+      return success;
     } catch (error) {
+      metricsCollector.leadRegistered(false);
+      logger.error('lead_mark_registered_error', {
+        telegramId,
+        error: error instanceof Error ? error.message : String(error)
+      });
       return false;
     }
   }
@@ -110,6 +142,11 @@ export class LeadService {
     }
 
     await Lead.updateOne({ telegramId }, { $set: update });
+    logger.info('lead_assign_campaign', {
+      telegramId,
+      campaign: update.campaign ?? null,
+      campaignId: update.campaignId ? String(update.campaignId) : null
+    });
   }
 
   static extractCampaignFromPayload(payload: unknown): {
@@ -194,6 +231,8 @@ export class LeadService {
   }): Promise<{ lead: ILead; created: boolean }> {
     const telegramId = params.telegramId.trim();
     if (!telegramId) {
+      logger.warn('lead_tma_open_missing_telegram_id');
+      metricsCollector.leadTmaOpenFailed();
       throw new Error('telegramId is required');
     }
 
@@ -203,43 +242,74 @@ export class LeadService {
     const campaignId = params.campaignId || fromPayload.campaignId || null;
     const normalizedCampaignId = this.normalizeCampaignId(campaignId);
 
-    const update: Record<string, unknown> = {
-      tmaOpenedAt: new Date(),
-      tmaPayload: payload ?? null,
-      payload: payload ?? null,
-      campaignLastInteractionAt: new Date()
-    };
-
-    if (campaign) {
-      update.campaign = campaign;
-    }
-    if (normalizedCampaignId) {
-      update.campaignId = normalizedCampaignId;
-    }
-
-    const existingLead = await Lead.findOneAndUpdate(
-      { telegramId },
-      { $set: update },
-      { new: true }
-    );
-
-    if (existingLead) {
-      return { lead: existingLead, created: false };
-    }
-
-    const lead = await Lead.create({
+    logger.info('lead_tma_open_attempt', {
       telegramId,
-      createdAt: new Date(),
-      isRegistered: false,
-      tmaOpenedAt: update.tmaOpenedAt,
-      tmaPayload: update.tmaPayload,
-      payload: update.payload,
-      campaign: campaign ?? undefined,
-      campaignId: normalizedCampaignId ?? undefined,
-      campaignLastInteractionAt: update.campaignLastInteractionAt
+      campaign,
+      campaignId: normalizedCampaignId ? String(normalizedCampaignId) : null
     });
 
-    return { lead, created: true };
+    try {
+      const update: Record<string, unknown> = {
+        tmaOpenedAt: new Date(),
+        tmaPayload: payload ?? null,
+        payload: payload ?? null,
+        campaignLastInteractionAt: new Date()
+      };
+
+      if (campaign) {
+        update.campaign = campaign;
+      }
+      if (normalizedCampaignId) {
+        update.campaignId = normalizedCampaignId;
+      }
+
+      const existingLead = await Lead.findOneAndUpdate(
+        { telegramId },
+        { $set: update },
+        { new: true }
+      );
+
+      if (existingLead) {
+        metricsCollector.leadTmaOpened(false);
+        logger.info('lead_tma_open_updated', {
+          telegramId,
+          leadId: existingLead._id,
+          campaign: update.campaign ?? null,
+          campaignId: normalizedCampaignId ? String(normalizedCampaignId) : null
+        });
+        return { lead: existingLead, created: false };
+      }
+
+      const lead = await Lead.create({
+        telegramId,
+        createdAt: new Date(),
+        isRegistered: false,
+        tmaOpenedAt: update.tmaOpenedAt,
+        tmaPayload: update.tmaPayload,
+        payload: update.payload,
+        campaign: campaign ?? undefined,
+        campaignId: normalizedCampaignId ?? undefined,
+        campaignLastInteractionAt: update.campaignLastInteractionAt
+      });
+
+      metricsCollector.leadAddCreated();
+      metricsCollector.leadTmaOpened(true);
+      logger.info('lead_tma_open_created', {
+        telegramId,
+        leadId: lead._id,
+        campaign: campaign ?? null,
+        campaignId: normalizedCampaignId ? String(normalizedCampaignId) : null
+      });
+
+      return { lead, created: true };
+    } catch (error) {
+      metricsCollector.leadTmaOpenFailed();
+      logger.error('lead_tma_open_error', {
+        telegramId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
   }
 
   static async getCampaignConversionStats(): Promise<LeadCampaignConversionStats[]> {
