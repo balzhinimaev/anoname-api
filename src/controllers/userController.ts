@@ -196,8 +196,21 @@ export const getPotentialMatches = async (req: Request, res: Response): Promise<
 export const updatePreferences = async (req: Request, res: Response): Promise<void> => {
   try {
     const { telegramId } = req.params;
-    const preferences = req.body;
-    
+    // Строгий allowlist — НЕ пишем сырой req.body (иначе schema-pollution / раздувание документа).
+    const body = (req.body || {}) as Record<string, any>;
+    const preferences: { gender?: string; ageRange?: { min?: number; max?: number } } = {};
+    if (['male', 'female', 'any'].includes(body.gender)) {
+      preferences.gender = body.gender;
+    }
+    if (body.ageRange && typeof body.ageRange === 'object') {
+      const min = Number(body.ageRange.min);
+      const max = Number(body.ageRange.max);
+      const range: { min?: number; max?: number } = {};
+      if (Number.isFinite(min)) range.min = Math.max(18, Math.min(100, Math.floor(min)));
+      if (Number.isFinite(max)) range.max = Math.max(18, Math.min(100, Math.floor(max)));
+      if (range.min !== undefined || range.max !== undefined) preferences.ageRange = range;
+    }
+
     const user = await User.findOneAndUpdate(
       { telegramId },
       { $set: { preferences } },
@@ -215,14 +228,31 @@ export const updatePreferences = async (req: Request, res: Response): Promise<vo
   }
 };
 
+const MAX_PHOTOS = 10;
+const isHttpsUrl = (u: unknown): u is string => {
+  if (typeof u !== 'string' || u.length > 1024 || !/^https:\/\//i.test(u)) return false;
+  try { new URL(u); return true; } catch { return false; }
+};
+
 export const uploadPhotos = async (req: Request, res: Response): Promise<void> => {
   try {
     const { telegramId } = req.params;
-    const { photos } = req.body;
+    const { photos } = req.body as { photos?: unknown };
+
+    // Валидация: только массив корректных https-URL; хард-кап общего числа фото.
+    if (!Array.isArray(photos) || photos.length === 0) {
+      res.status(400).json({ error: 'photos должен быть непустым массивом' });
+      return;
+    }
+    const clean = photos.filter(isHttpsUrl).slice(0, MAX_PHOTOS);
+    if (clean.length === 0) {
+      res.status(400).json({ error: 'Нет валидных https-ссылок на фото' });
+      return;
+    }
 
     const user = await User.findOneAndUpdate(
       { telegramId },
-      { $push: { photos: { $each: photos } } },
+      { $push: { photos: { $each: clean, $slice: -MAX_PHOTOS } } },
       { new: true }
     );
 

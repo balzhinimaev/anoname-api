@@ -9,7 +9,16 @@ export const USERNAME_MIN = 3;
 export const USERNAME_MAX = 32;
 export const PASSWORD_MIN = 8;
 export const PASSWORD_MAX = 128;
-const BCRYPT_ROUNDS = 10;
+const BCRYPT_ROUNDS = 12;
+
+// Заранее посчитанный хэш для тайминг-эквализации логина при несуществующем юзере
+// (чтобы no-user и bad-password ветки тратили сопоставимое время → нет enumeration-оракула).
+const DUMMY_HASH = '$2a$12$C6UzMDM.H6dfI/f/IKcEeO3f4t8x5h8b3a1q2w3e4r5t6y7u8i9o0';
+
+/** «Холостая» проверка пароля (для пути «пользователь не найден»). */
+export function dummyVerify(password: string): Promise<boolean> {
+  return bcrypt.compare(password || '', DUMMY_HASH).catch(() => false);
+}
 
 /** Допустимые символы логина: буквы/цифры/._- , не начинается и не кончается разделителем. */
 const USERNAME_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
@@ -35,10 +44,19 @@ export function validateUsername(username: unknown): ValidationResult {
 }
 
 /** Проверяет пароль. */
+// Небольшой блок-лист самых частых паролей (нижний регистр).
+const COMMON_PASSWORDS = new Set([
+  '12345678', '123456789', '1234567890', 'password', 'password1', 'qwerty123',
+  'qwertyui', '11111111', '00000000', 'iloveyou', 'admin123', 'welcome1',
+  'football', 'baseball', 'sunshine', 'princess', 'dragon123', 'superman',
+  'qwerty12', 'password123', 'abc12345', '87654321', 'zxcvbnm1',
+]);
+
 export function validatePassword(password: unknown): ValidationResult {
   if (typeof password !== 'string') return { ok: false, reason: 'PASSWORD_REQUIRED' };
   if (password.length < PASSWORD_MIN) return { ok: false, reason: 'PASSWORD_TOO_SHORT' };
   if (password.length > PASSWORD_MAX) return { ok: false, reason: 'PASSWORD_TOO_LONG' };
+  if (COMMON_PASSWORDS.has(password.toLowerCase())) return { ok: false, reason: 'PASSWORD_TOO_COMMON' };
   return { ok: true };
 }
 

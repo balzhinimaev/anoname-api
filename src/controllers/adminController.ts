@@ -14,10 +14,12 @@ export const searchUsers = async (req: Request, res: Response): Promise<void> =>
 
     const filter: any = {};
     if (q && q.length > 0) {
+      // Экранируем regex-метасимволы — иначе catastrophic backtracking (ReDoS) по всей коллекции.
+      const safe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const or: any[] = [
-        { username: { $regex: q, $options: 'i' } },
-        { firstName: { $regex: q, $options: 'i' } },
-        { lastName: { $regex: q, $options: 'i' } },
+        { username: { $regex: safe, $options: 'i' } },
+        { firstName: { $regex: safe, $options: 'i' } },
+        { lastName: { $regex: safe, $options: 'i' } },
       ];
       if (/^\d+$/.test(q)) {
         or.push({ telegramId: Number(q) });

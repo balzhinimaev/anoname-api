@@ -40,7 +40,7 @@ export const socketAuth = async (
     // 1) Проверяем подпись JWT; если невалидна — сообщаем корректную причину
     let decoded: { userId?: string; telegramId?: string; isAdmin?: boolean };
     try {
-      decoded = jwt.verify(token, config.jwtSecret) as { userId?: string; telegramId?: string; isAdmin?: boolean };
+      decoded = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] }) as { userId?: string; telegramId?: string; isAdmin?: boolean };
     } catch (e) {
       wsLogger.error('system', 'socket-auth', e as Error, {
         reason: 'jwt_verify_failed'

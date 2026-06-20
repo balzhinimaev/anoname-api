@@ -22,7 +22,9 @@ const reportSchema = new mongoose.Schema<IReport>({
   timestamps: true
 });
 
-reportSchema.index({ reporterUserId: 1, chatId: 1, reason: 1 });
+// Уникальность: один репортер не может задублировать жалобу по той же причине в одном чате
+// (защита от report-флуда; повторная попытка вернёт duplicate-key — обрабатываем как «уже отправлено»).
+reportSchema.index({ reporterUserId: 1, chatId: 1, reason: 1 }, { unique: true });
 
 export default mongoose.model<IReport>('Report', reportSchema);
 

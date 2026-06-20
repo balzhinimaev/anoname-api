@@ -38,13 +38,17 @@ describe('validateUsername', () => {
 });
 
 describe('validatePassword', () => {
-  it('принимает пароль >= 8 символов', () => {
-    expect(validatePassword('12345678').ok).toBe(true);
+  it('принимает нормальный пароль >= 8 символов', () => {
+    expect(validatePassword('a8x7q2m9z').ok).toBe(true);
   });
   it('отклоняет короткий/длинный/не-строку', () => {
     expect(validatePassword('1234567')).toMatchObject({ ok: false, reason: 'PASSWORD_TOO_SHORT' });
     expect(validatePassword('x'.repeat(129))).toMatchObject({ ok: false, reason: 'PASSWORD_TOO_LONG' });
     expect(validatePassword(undefined)).toMatchObject({ ok: false, reason: 'PASSWORD_REQUIRED' });
+  });
+  it('отклоняет частый пароль', () => {
+    expect(validatePassword('password')).toMatchObject({ ok: false, reason: 'PASSWORD_TOO_COMMON' });
+    expect(validatePassword('12345678')).toMatchObject({ ok: false, reason: 'PASSWORD_TOO_COMMON' });
   });
 });
 

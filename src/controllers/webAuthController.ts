@@ -13,6 +13,7 @@ import {
   validatePasswordConfirm,
   hashPassword,
   verifyPassword,
+  dummyVerify,
 } from '../utils/webAuth';
 import { ReferralService } from '../services/ReferralService';
 import { TelegramNotificationService } from '../services/TelegramNotificationService';
@@ -135,8 +136,10 @@ export const loginWeb = async (req: Request, res: Response): Promise<void> => {
     const login = normalizeLogin(username);
     const user = await User.findOne({ login });
 
-    // Единое сообщение, чтобы не раскрывать существование логина
+    // Единое сообщение + тайминг-эквализация (холостой bcrypt), чтобы no-user и
+    // bad-password ветки тратили сопоставимое время → нет enumeration-оракула.
     if (!user || !user.passwordHash) {
+      await dummyVerify(password);
       logger.info('web_login_invalid', { login });
       res.status(401).json({ error: 'Неверное имя пользователя или пароль', code: 'INVALID_CREDENTIALS' });
       return;
@@ -158,7 +161,7 @@ export const loginWeb = async (req: Request, res: Response): Promise<void> => {
     });
     if (existingToken) {
       try {
-        jwt.verify(existingToken.token, config.jwtSecret as Secret);
+        jwt.verify(existingToken.token, config.jwtSecret as Secret, { algorithms: ['HS256'] });
         logger.info('web_login_reuse_token', { login });
         res.status(200).json({ token: existingToken.token, user: publicUser(user) });
         return;

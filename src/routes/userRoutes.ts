@@ -477,7 +477,7 @@ router.get('/me/blocked-by', authMiddleware as express.RequestHandler, async (re
  * Обновить фото профиля текущего пользователя
  */
 router.put('/me/profile-photo', authMiddleware as express.RequestHandler, [
-  body('url').isString().isLength({ min: 1 }).withMessage('url обязателен')
+  body('url').isString().isURL({ protocols: ['https'], require_protocol: true }).isLength({ max: 1024 }).withMessage('url должен быть https-ссылкой')
 ], validateRequest as express.RequestHandler, async (req: Request, res: express.Response) => {
   try {
     if (!req.user?.userId) { res.status(401).json({ error: 'Unauthorized' }); return; }

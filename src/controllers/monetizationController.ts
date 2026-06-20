@@ -5,6 +5,7 @@
 
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
+import { safeEqual } from '../utils/secrets';
 import { MonetizationService, SUBSCRIPTION_TIERS, PURCHASE_ITEMS } from '../services/MonetizationService';
 import config from '../config';
 import crypto from 'crypto';
@@ -214,7 +215,7 @@ export const starsPaymentSuccess = async (req: Request, res: Response): Promise<
   try {
     const apiKey = (req.headers['x-api-key'] || req.headers['X-API-Key'] || '') as string;
     const expected = process.env.BOT_BACKEND_SECRET || '';
-    if (!expected || !apiKey || apiKey !== expected) {
+    if (!safeEqual(apiKey, expected)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }

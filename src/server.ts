@@ -48,7 +48,9 @@ const port = process.env.PORT || 3001;
 // Безопасные заголовки. Отключаем CSP для корректной работы Swagger UI и статических ассетов
 app.use(helmet({
   contentSecurityPolicy: false,
-  crossOriginResourcePolicy: { policy: 'cross-origin' }
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  // HSTS: форсируем HTTPS на год (nginx тоже выставит — defense-in-depth)
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true }
 }));
 
 // CORS: белый список и regex-паттерны из окружения. Разрешаем также запросы без Origin (curl, моб. WebView)
@@ -94,6 +96,13 @@ const apiLimiter = rateLimit({
   max: 600,
 });
 
+// Строгий лимитер на создание аккаунтов (анти-спам БД + Telegram-канала уведомлений).
+// НЕ применяем к /api/auth/vk — это и логин (вызывается на каждый открытие апп).
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+});
+
 /**
  * Swagger UI: в проде закрываем. Если заданы SWAGGER_USER/PASSWORD — требуем basic auth.
  * В dev/test — открыто без ограничения.
@@ -130,12 +139,14 @@ if (config.env === 'production') {
 export const wsManager = new WebSocketManager(httpServer);
 
 // Публичные маршруты (не требуют аутентификации)
+// Строгий лимитер именно на регистрацию (до общего authLimiter).
+app.use(['/api/auth/register', '/api/auth/web/register'], registerLimiter);
 app.use('/api/auth', authLimiter, authRouter);
 app.use('/api/monitoring', monitoringRouter);
 app.use('/api/admin', adminRouter);
-app.use('/api/analytics', analyticsRouter);
-app.use('/api/prelaunch', prelaunchRouter);
-app.use('/api/leads', leadRouter);
+app.use('/api/analytics', apiLimiter, analyticsRouter);
+app.use('/api/prelaunch', apiLimiter, prelaunchRouter);
+app.use('/api/leads', apiLimiter, leadRouter);
 app.use('/api/telegram', botWebhookRouter);
 app.use('/api/analytics', botAnalyticsRouter);
 app.get('/health', (_req, res) => {

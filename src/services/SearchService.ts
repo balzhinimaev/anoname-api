@@ -124,11 +124,14 @@ export class SearchService {
       isPremium
     };
 
-    // Добавляем местоположение только если используется геолокация и координаты предоставлены
+    // Добавляем местоположение только если используется геолокация и координаты предоставлены.
+    // Огрубляем до ~1 км сетки (3 знака после запятой) — снижает точность таргетинга/триангуляции,
+    // сохраняя пригодность для поиска «рядом».
     if (criteria.useGeolocation && criteria.location) {
+      const round3 = (n: number) => Math.round(n * 1000) / 1000;
       searchData.location = {
         type: 'Point',
-        coordinates: [criteria.location.longitude, criteria.location.latitude]
+        coordinates: [round3(criteria.location.longitude), round3(criteria.location.latitude)]
       };
     }
 
@@ -585,15 +588,14 @@ export class SearchService {
           ]);
 
           // Уведомления пользователям (вне транзакции)
+          // PII: в анонимном матче НЕ раскрываем telegramId/@username/фамилию партнёра.
+          // Оставляем безопасные для отображения поля (имя, фото, пол/возраст/рейтинг).
           wsManager.sendToUser(String(search1.userId), 'search:matched', {
             matchedUser: {
-              telegramId: search2.telegramId,
               gender: search2.gender,
               age: search2.age,
               rating: user2Data?.rating || 0,
-              username: user2Data?.username,
               firstName: user2Data?.firstName,
-              lastName: user2Data?.lastName,
               profilePhoto: user2Data?.profilePhoto,
               photos: user2Data?.photos,
               isPremium: !!(user2Data?.subscription?.isActive && user2Data?.subscription?.type && user2Data?.subscription?.type !== 'basic'),
@@ -602,13 +604,10 @@ export class SearchService {
           });
           wsManager.sendToUser(String(search2.userId), 'search:matched', {
             matchedUser: {
-              telegramId: search1.telegramId,
               gender: search1.gender,
               age: search1.age,
               rating: user1Data?.rating || 0,
-              username: user1Data?.username,
               firstName: user1Data?.firstName,
-              lastName: user1Data?.lastName,
               profilePhoto: user1Data?.profilePhoto,
               photos: user1Data?.photos,
               isPremium: !!(user1Data?.subscription?.isActive && user1Data?.subscription?.type && user1Data?.subscription?.type !== 'basic'),

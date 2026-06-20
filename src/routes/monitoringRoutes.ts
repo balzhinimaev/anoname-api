@@ -10,38 +10,16 @@ router.get('/metrics', authMiddleware, requireAdmin, (_req, res) => {
   res.json(metricsCollector.getMetrics());
 });
 
-// Проверка здоровья системы (публичный маршрут)
+// Проверка здоровья системы (публичный маршрут).
+// Намеренно НЕ раскрываем внутренние метрики/последнюю ошибку — только статус.
+// Полные метрики доступны на защищённом /metrics (admin).
 router.get('/health', (_req, res) => {
   const metrics = metricsCollector.getMetrics();
-  const status = {
-    status: 'OK',
+  const isHealthy = metrics.connections.current >= 0 && metrics.searches.active >= 0;
+  res.status(isHealthy ? 200 : 503).json({
+    status: isHealthy ? 'OK' : 'ERROR',
     timestamp: new Date().toISOString(),
-    services: {
-      websocket: {
-        status: metrics.connections.current >= 0 ? 'OK' : 'ERROR',
-        activeConnections: metrics.connections.current
-      },
-      search: {
-        status: metrics.searches.active >= 0 ? 'OK' : 'ERROR',
-        activeSearches: metrics.searches.active
-      }
-    },
-    performance: {
-      messageLatency: `${metrics.latency.avg.toFixed(2)}ms`,
-      messagesPerMinute: Math.round(metrics.messages.perMinute)
-    },
-    moderation: metrics.reports,
-    errors: {
-      count: metrics.errors.count,
-      lastError: metrics.errors.lastError?.message
-    }
-  };
-
-  const isHealthy = 
-    status.services.websocket.status === 'OK' && 
-    status.services.search.status === 'OK';
-
-  res.status(isHealthy ? 200 : 503).json(status);
+  });
 });
 
 // Агрегированные метрики модерации: отчёт за 24 часа (защищенный маршрут)
