@@ -479,7 +479,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     // Если подпись невалидна (секрет менялся) — не переиспользуем, выпустим новый токен.
     if (existingToken) {
       try {
-        jwt.verify(existingToken.token, config.jwtSecret as Secret);
+        jwt.verify(existingToken.token, config.jwtSecret as Secret, { algorithms: ['HS256'] });
         logger.info('auth_login_reuse_token', { telegramId });
         res.status(200).json({
           token: existingToken.token,

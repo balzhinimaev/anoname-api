@@ -31,18 +31,21 @@ export default {
   botUsername: process.env.BOT_USERNAME || '',
   botBackendSecret: process.env.BOT_BACKEND_SECRET || '',
   adminBackendSecret: process.env.ADMIN_BACKEND_SECRET || '',
-  // Требовать initData на бэке (аналог фронтового VITE_REQUIRE_TG_INITDATA)
-  requireTgInitData: (process.env.REQUIRE_TG_INITDATA || 'false').toLowerCase() === 'true',
+  // Требовать initData на бэке (аналог фронтового VITE_REQUIRE_TG_INITDATA).
+  // Default = TRUE (fail-closed): без явного REQUIRE_TG_INITDATA=false подпись обязательна,
+  // иначе тело-запрос с одним telegramId был бы обходом аутентификации.
+  requireTgInitData: (process.env.REQUIRE_TG_INITDATA || 'true').toLowerCase() === 'true',
   // Максимальный возраст initData в секундах
   tgInitDataMaxAgeSec: Number(process.env.TG_INITDATA_MAX_AGE_SEC || process.env.TG_INITDATA_TTL_SEC || 300),
   // VK Mini Apps (отдельный фронт anoname-vk-miniapp)
   vkAppId: process.env.VK_APP_ID || '',
   // Защищённый ключ VK-приложения — проверка подписи launch-параметров (sign)
   vkSecureKey: process.env.VK_SECURE_KEY || '',
-  // Требовать валидную подпись VK launch-параметров на бэке
-  requireVkSign: (process.env.REQUIRE_VK_SIGN || 'false').toLowerCase() === 'true',
-  // Максимальный возраст VK launch-параметров (vk_ts) в секундах; 0 = не проверять
-  vkSignMaxAgeSec: Number(process.env.VK_SIGN_MAX_AGE_SEC || 0),
+  // Требовать валидную подпись VK launch-параметров на бэке (fail-closed по умолчанию)
+  requireVkSign: (process.env.REQUIRE_VK_SIGN || 'true').toLowerCase() === 'true',
+  // Максимальный возраст VK launch-параметров (vk_ts) в секундах; 0 = не проверять.
+  // Default = 3600: защита от бессрочного replay перехваченной подписи.
+  vkSignMaxAgeSec: Number(process.env.VK_SIGN_MAX_AGE_SEC || 3600),
   // A/B и Redis (опционально)
   redisUrl: process.env.REDIS_URL || '',
   abSplitA: Math.min(100, Math.max(0, Number(process.env.AB_SPLIT_A || 50))),

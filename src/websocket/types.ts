@@ -8,7 +8,8 @@ export interface ServerToClientEvents {
   // Поиск и мэтчинг
   'search:matched': (data: {
     matchedUser: {
-      telegramId: string;
+      // PII (telegramId/username/lastName) намеренно не передаётся в анонимном чате — поля опциональны.
+      telegramId?: string;
       gender: 'male' | 'female';
       age: number;
       rating: number;
@@ -80,7 +81,7 @@ export interface ServerToClientEvents {
   }) => void;
 
   // Подтверждение отправки жалобы
-  'report:submitted': (data: { chatId: string; reportId: string }) => void;
+  'report:submitted': (data: { chatId: string; reportId?: string }) => void;
 
   // Снимок сессии после connect/restore
   'session:state': (data: {
@@ -94,7 +95,7 @@ export interface ServerToClientEvents {
       reason?: 'tma_closed' | 'network' | 'unknown';
     };
     matchedUser?: {
-      telegramId: string;
+      telegramId?: string;
       gender?: 'male' | 'female';
       age?: number;
       rating?: number;

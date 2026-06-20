@@ -1,6 +1,7 @@
 import express from 'express';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import logger from '../utils/logger';
+import { safeEqual } from '../utils/secrets';
 
 const router = express.Router();
 
@@ -9,7 +10,7 @@ router.post('/bot-event', async (req, res) => {
   try {
     const apiKey = (req.headers['x-api-key'] || req.headers['X-API-Key'] || '') as string;
     const expected = process.env.BOT_BACKEND_SECRET || '';
-    if (!expected || !apiKey || apiKey !== expected) {
+    if (!safeEqual(apiKey, expected)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }

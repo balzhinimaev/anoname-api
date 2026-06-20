@@ -47,7 +47,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     }
 
     // Верифицируем JWT
-    const decoded = jwt.verify(token, config.jwtSecret) as {
+    const decoded = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] }) as {
       telegramId: string;
       userId: string;
       isAdmin?: boolean;

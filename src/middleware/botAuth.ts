@@ -1,5 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import config from '../config';
+
+/** Сравнение секретов в постоянное время (защита от timing-атак). */
+const timingSafeEqualStr = (a: string, b: string): boolean => {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+};
 
 const resolveSecret = (req: Request): string | undefined => {
   const adminSecret = req.headers['x-admin-secret'];
@@ -22,7 +31,10 @@ export const botAuth = (req: Request, res: Response, next: NextFunction): void =
     return;
   }
 
-  if (!providedSecret || !allowedSecrets.includes(providedSecret)) {
+  const matches = providedSecret
+    ? allowedSecrets.some((s) => timingSafeEqualStr(providedSecret, s))
+    : false;
+  if (!matches) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }

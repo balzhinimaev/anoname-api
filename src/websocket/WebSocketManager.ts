@@ -105,12 +105,15 @@ export class WebSocketManager {
       bucket = { tokens: this.WS_BUCKET_CAPACITY, lastRefill: now };
       this.wsRateBuckets.set(userId, bucket);
     }
-    // пополнение токенов раз в WS_BUCKET_REFILL_MS
-    if (now - bucket.lastRefill >= this.WS_BUCKET_REFILL_MS) {
-      bucket.tokens = this.WS_BUCKET_CAPACITY;
+    // Непрерывное пополнение (token bucket) вместо hard-reset раз в окно —
+    // убирает burst ×2 на границе окна. Скорость: CAPACITY токенов за REFILL_MS.
+    const elapsed = now - bucket.lastRefill;
+    if (elapsed > 0) {
+      const refill = (elapsed / this.WS_BUCKET_REFILL_MS) * this.WS_BUCKET_CAPACITY;
+      bucket.tokens = Math.min(this.WS_BUCKET_CAPACITY, bucket.tokens + refill);
       bucket.lastRefill = now;
     }
-    if (bucket.tokens > 0) {
+    if (bucket.tokens >= 1) {
       bucket.tokens -= 1;
       return true;
     }
@@ -145,16 +148,14 @@ export class WebSocketManager {
         // Попробуем отдать минимальные данные собеседника для гидратации UI
         // Берем из User: telegramId, gender, age, rating, username/имя/фото, премиум статус
         try {
-          const other = await User.findById(otherParticipant).select('telegramId gender age rating username firstName lastName profilePhoto photos subscription');
+          // PII: НЕ раскрываем telegramId/@username/фамилию партнёра при гидратации сессии.
+          const other = await User.findById(otherParticipant).select('gender age rating firstName profilePhoto photos subscription');
           if (other) {
             matchedUser = {
-              telegramId: String(other.telegramId),
               gender: other.gender as any,
               age: other.age,
               rating: other.rating,
-              username: other.username,
               firstName: other.firstName,
-              lastName: other.lastName,
               profilePhoto: other.profilePhoto,
               photos: other.photos,
               isPremium: !!(other.subscription?.isActive && other.subscription?.type && other.subscription?.type !== 'basic'),
@@ -599,6 +600,12 @@ export class WebSocketManager {
           // Обратная совместимость: ранее фронт слушал error
           socket.emit('error', { message: 'Report submitted' });
         } catch (error) {
+          // Дубль жалобы (тот же reporter/chat/reason) — это не ошибка, а анти-флуд.
+          if ((error as { code?: number })?.code === 11000) {
+            socket.emit('report:submitted', { chatId: String((data as any)?.chatId || '') });
+            socket.emit('error', { message: 'Report already submitted' });
+            return;
+          }
           metricsCollector.reportErrored((data as any)?.reason || 'unknown');
           wsLogger.error('chat_report_failed', userId, error as Error, { payload: data });
           socket.emit('error', { message: 'Failed to submit report' });

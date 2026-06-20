@@ -58,17 +58,19 @@ export class ChatService {
     await chat.save();
     
     // 4. Загружаем информацию об отправителе и сообщении-ответе для отправки клиенту
+    // PII: НЕ раскрываем @username и фамилию партнёра (прямой путь к деанону).
+    // telegramId оставляем — фронт по нему определяет «своё» сообщение (isFromMe).
     const messageWithSender = await message.populate([
       {
         path: 'sender',
-        select: 'telegramId username firstName lastName photos'
+        select: 'telegramId firstName photos profilePhoto'
       },
       {
         path: 'replyTo',
         select: 'content sender timestamp',
         populate: {
           path: 'sender',
-          select: 'telegramId username firstName lastName'
+          select: 'firstName'
         }
       }
     ]);
@@ -87,6 +89,12 @@ export class ChatService {
     userId: string,
     beforeTimestamp: Date
   ) {
+    // Авторизация: только участник чата может помечать прочтение (как в sendMessage/endChat).
+    const chat = await Chat.findById(chatId).select('participants');
+    if (!chat || !chat.participants.some((p) => p.toString() === userId)) {
+      throw new Error('User is not a participant of this chat');
+    }
+
     // Находим все непрочитанные сообщения в чате, отправленные другими пользователями
     // и полученные до указанной временной метки.
     await Message.updateMany(
