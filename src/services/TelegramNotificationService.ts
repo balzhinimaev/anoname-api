@@ -149,6 +149,8 @@ export class TelegramNotificationService {
   private static formatPlatform(platform: string): string {
     switch (platform) {
       case 'telegram': return '📱 Telegram WebApp';
+      case 'vk': return '🔵 ВКонтакте (VK Mini App)';
+      case 'web': return '🌐 Веб (браузер)';
       case 'api': return '🔧 API';
       default: return `📱 ${platform}`;
     }

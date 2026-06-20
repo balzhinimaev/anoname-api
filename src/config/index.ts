@@ -35,6 +35,14 @@ export default {
   requireTgInitData: (process.env.REQUIRE_TG_INITDATA || 'false').toLowerCase() === 'true',
   // Максимальный возраст initData в секундах
   tgInitDataMaxAgeSec: Number(process.env.TG_INITDATA_MAX_AGE_SEC || process.env.TG_INITDATA_TTL_SEC || 300),
+  // VK Mini Apps (отдельный фронт anoname-vk-miniapp)
+  vkAppId: process.env.VK_APP_ID || '',
+  // Защищённый ключ VK-приложения — проверка подписи launch-параметров (sign)
+  vkSecureKey: process.env.VK_SECURE_KEY || '',
+  // Требовать валидную подпись VK launch-параметров на бэке
+  requireVkSign: (process.env.REQUIRE_VK_SIGN || 'false').toLowerCase() === 'true',
+  // Максимальный возраст VK launch-параметров (vk_ts) в секундах; 0 = не проверять
+  vkSignMaxAgeSec: Number(process.env.VK_SIGN_MAX_AGE_SEC || 0),
   // A/B и Redis (опционально)
   redisUrl: process.env.REDIS_URL || '',
   abSplitA: Math.min(100, Math.max(0, Number(process.env.AB_SPLIT_A || 50))),
