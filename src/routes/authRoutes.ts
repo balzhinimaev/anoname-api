@@ -6,6 +6,8 @@
 import express from 'express';
 import { body } from 'express-validator';
 import * as authController from '../controllers/authController';
+import * as webAuthController from '../controllers/webAuthController';
+import * as vkAuthController from '../controllers/vkAuthController';
 import { validateRequest } from '../middleware/validateRequest';
 import { authMiddleware } from '../middleware/authMiddleware';
 
@@ -161,6 +163,128 @@ router.post(
   ],
   validateRequest as express.RequestHandler,
   authController.login as express.RequestHandler
+);
+
+/**
+ * @swagger
+ * /api/auth/web/register:
+ *   post:
+ *     tags: [Аутентификация]
+ *     summary: Регистрация веб-аккаунта (username + пароль)
+ *     description: Создаёт аккаунт для обычного браузера по логину и паролю. Без Telegram/VK и без платежей.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [username, password, confirmPassword]
+ *             properties:
+ *               username:
+ *                 type: string
+ *                 minLength: 3
+ *                 maxLength: 32
+ *                 example: "alex"
+ *               password:
+ *                 type: string
+ *                 minLength: 8
+ *                 example: "s3cret-pass"
+ *               confirmPassword:
+ *                 type: string
+ *                 example: "s3cret-pass"
+ *     responses:
+ *       201:
+ *         description: Аккаунт создан, возвращён JWT-токен
+ *       400:
+ *         description: Ошибка валидации (имя/пароль/несовпадение)
+ *       409:
+ *         description: Имя пользователя уже занято
+ */
+router.post(
+  '/web/register',
+  [
+    body('username').isString().trim().isLength({ min: 3, max: 32 }).withMessage('Имя пользователя 3–32 символа'),
+    body('password').isString().isLength({ min: 8, max: 128 }).withMessage('Пароль минимум 8 символов'),
+    body('confirmPassword').isString().withMessage('Подтвердите пароль'),
+  ],
+  validateRequest as express.RequestHandler,
+  webAuthController.registerWeb as express.RequestHandler
+);
+
+/**
+ * @swagger
+ * /api/auth/web/login:
+ *   post:
+ *     tags: [Аутентификация]
+ *     summary: Вход веб-аккаунта (username + пароль)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [username, password]
+ *             properties:
+ *               username:
+ *                 type: string
+ *                 example: "alex"
+ *               password:
+ *                 type: string
+ *                 example: "s3cret-pass"
+ *     responses:
+ *       200:
+ *         description: Успешный вход, возвращён JWT-токен
+ *       400:
+ *         description: Не указаны учётные данные
+ *       401:
+ *         description: Неверное имя пользователя или пароль
+ */
+router.post(
+  '/web/login',
+  [
+    body('username').isString().trim().notEmpty().withMessage('Укажите имя пользователя'),
+    body('password').isString().notEmpty().withMessage('Укажите пароль'),
+  ],
+  validateRequest as express.RequestHandler,
+  webAuthController.loginWeb as express.RequestHandler
+);
+
+/**
+ * @swagger
+ * /api/auth/vk:
+ *   post:
+ *     tags: [Аутентификация]
+ *     summary: Авторизация VK Mini App (по подписи launch-параметров)
+ *     description: Проверяет подпись launch-параметров VK (vk_* + sign). При первом входе создаёт аккаунт, далее логинит. Без пароля и без платежей.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [params]
+ *             properties:
+ *               params:
+ *                 type: string
+ *                 description: Строка launch-параметров (window.location.search), с ведущим '?' или без
+ *                 example: "vk_app_id=51234567&vk_user_id=1272270574&vk_ts=1718450000&sign=..."
+ *     responses:
+ *       200:
+ *         description: Успешный вход существующего пользователя
+ *       201:
+ *         description: Создан новый аккаунт VK
+ *       400:
+ *         description: Не переданы launch-параметры
+ *       401:
+ *         description: Неверная подпись/параметры VK
+ */
+router.post(
+  '/vk',
+  [
+    body('params').isString().notEmpty().withMessage('params обязателен'),
+  ],
+  validateRequest as express.RequestHandler,
+  vkAuthController.authVk as express.RequestHandler
 );
 
 /**

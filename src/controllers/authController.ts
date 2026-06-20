@@ -127,7 +127,7 @@ const extractCampaignFromStartPayload = (input: unknown): { campaign?: string; c
   };
 };
 
-const createAndSaveToken = async (
+export const createAndSaveToken = async (
   user: any,
   req: Request,
   platform = 'telegram',

@@ -11,8 +11,22 @@ import mongoose, { Schema, Document } from 'mongoose';
  * @extends {Document}
  */
 export interface IUser extends Document {
-  /** Уникальный идентификатор пользователя в Telegram */
+  /**
+   * Уникальный идентификатор пользователя.
+   * Для Telegram — реальный Telegram ID (положительный).
+   * Для веб/VK-аккаунтов (без Telegram) — синтетический ОТРИЦАТЕЛЬНЫЙ ID,
+   * чтобы не пересекаться с реальными Telegram ID и сохранить совместимость
+   * с моделью Token и downstream-кодом, завязанным на telegramId.
+   */
   telegramId: number;
+  /** Способ аутентификации аккаунта */
+  authProvider?: 'telegram' | 'web' | 'vk';
+  /** Логин для входа по паролю (веб-аккаунты). Уникальный, в нижнем регистре. */
+  login?: string;
+  /** Bcrypt-хэш пароля (только для веб-аккаунтов) */
+  passwordHash?: string;
+  /** ID пользователя ВКонтакте (для аккаунтов из VK Mini App). Уникальный. */
+  vkId?: number;
   /** Роль пользователя */
   role: 'user' | 'admin';
   /** A/B группа (вариант эксперимента) */
@@ -126,6 +140,10 @@ export interface IUser extends Document {
  */
 const UserSchema: Schema = new Schema({
   telegramId: { type: Number, required: true, unique: true },
+  authProvider: { type: String, enum: ['telegram', 'web', 'vk'], default: 'telegram' },
+  login: { type: String, unique: true, sparse: true, lowercase: true, trim: true },
+  passwordHash: { type: String },
+  vkId: { type: Number, unique: true, sparse: true },
   role: { type: String, enum: ['user', 'admin'], default: 'user' },
   cohort: { type: String, enum: ['A', 'B'], required: false },
   campaign: { type: String },
