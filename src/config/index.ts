@@ -43,9 +43,11 @@ export default {
   vkSecureKey: process.env.VK_SECURE_KEY || '',
   // Требовать валидную подпись VK launch-параметров на бэке (fail-closed по умолчанию)
   requireVkSign: (process.env.REQUIRE_VK_SIGN || 'true').toLowerCase() === 'true',
-  // Максимальный возраст VK launch-параметров (vk_ts) в секундах; 0 = не проверять.
-  // Default = 3600: защита от бессрочного replay перехваченной подписи.
-  vkSignMaxAgeSec: Number(process.env.VK_SIGN_MAX_AGE_SEC || 3600),
+  // Максимальный возраст VK launch-параметров (vk_ts) в секундах; 0 = НЕ проверять.
+  // ВАЖНО: default = 0. VK кэширует launch-параметры и переиспользует их со СТАРЫМ
+  // vk_ts (часы/дни), поэтому freshness-проверка ломает легитимный вход (VK_TS_EXPIRED).
+  // Включать ненулевое значение можно только вместе с server-issued nonce.
+  vkSignMaxAgeSec: Number(process.env.VK_SIGN_MAX_AGE_SEC || 0),
   // A/B и Redis (опционально)
   redisUrl: process.env.REDIS_URL || '',
   abSplitA: Math.min(100, Math.max(0, Number(process.env.AB_SPLIT_A || 50))),
