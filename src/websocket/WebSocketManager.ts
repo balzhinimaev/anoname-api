@@ -16,6 +16,7 @@ import { chatEndSchema, chatMessageSchema, chatRateSchema, chatReadSchema, searc
 import Report from '../models/Report';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { BlockService } from '../services/BlockService';
+import { gameManager, OutEvent } from '../services/GameService';
 
 // Создаем статическую карту для хранения таймаутов
 const pendingSearchCancellations = new Map<string, NodeJS.Timeout>();
@@ -612,6 +613,41 @@ export class WebSocketManager {
         }
       });
 
+      // ── Мини-игры ────────────────────────────────────────────────────────────
+      // Приглашение: проверяем участие в чате (DB) один раз, заводим сессию.
+      socket.on('game:invite', async (data) => {
+        try {
+          if (!this.wsRateAllow(userId)) { socket.emit('error', { message: 'Too many requests' }); return; }
+          const chatId = String((data as any)?.chatId || '');
+          const gameId = String((data as any)?.gameId || '');
+          if (!/^[a-f\d]{24}$/i.test(chatId)) { socket.emit('error', { message: 'Invalid chatId' }); return; }
+          const chat = await Chat.findById(chatId).select('participants isActive');
+          if (!chat || !chat.isActive || !chat.participants.some((p) => p.toString() === userId)) {
+            socket.emit('error', { message: 'Forbidden' }); return;
+          }
+          const players = chat.participants.map((p) => p.toString()) as [string, string];
+          this.dispatchGameEvents(gameManager.invite(chatId, userId, gameId, players));
+        } catch (e) {
+          wsLogger.error('game_invite', userId, e as Error);
+        }
+      });
+      socket.on('game:respond', (data) => {
+        try {
+          this.dispatchGameEvents(gameManager.respond(String((data as any)?.chatId || ''), userId, Boolean((data as any)?.accept)));
+        } catch (e) { wsLogger.error('game_respond', userId, e as Error); }
+      });
+      socket.on('game:event', (data) => {
+        try {
+          // draw/guess/clear/skip — авторизация по in-memory сессии (без DB на каждый штрих)
+          this.dispatchGameEvents(gameManager.event(String((data as any)?.chatId || ''), userId, String((data as any)?.type || ''), (data as any)?.payload));
+        } catch (e) { wsLogger.error('game_event', userId, e as Error); }
+      });
+      socket.on('game:leave', (data) => {
+        try {
+          this.dispatchGameEvents(gameManager.leave(String((data as any)?.chatId || ''), userId));
+        } catch (e) { wsLogger.error('game_leave', userId, e as Error); }
+      });
+
       // Обработчики контактов
       socket.on('contact:request', (data) => this.handleContactRequest(socket, data));
       socket.on('contact:respond', (data) => this.handleContactResponse(socket, data));
@@ -919,6 +955,13 @@ export class WebSocketManager {
       userSocketIds.forEach(socketId => {
         this.io.to(socketId).emit(event, ...args);
       });
+    }
+  }
+
+  /** Рассылка адресных игровых событий (из GameManager) по сокетам пользователей. */
+  private dispatchGameEvents(events: OutEvent[]): void {
+    for (const e of events) {
+      this.sendToUser(e.toUserId, e.event as keyof ServerToClientEvents, e.data as never);
     }
   }
 

@@ -129,6 +129,12 @@ export interface ServerToClientEvents {
 
   // Предстартовая очередь
   'prelaunch:stats': (data: { count: number }) => void;
+
+  // Мини-игры (generic игровой слой)
+  'game:invite': (data: { gameId: string; by: string; title: string }) => void;
+  'game:start': (data: { gameId: string; role: 'drawer' | 'guesser'; word?: string; myScore: number; opponentScore: number; round: number }) => void;
+  'game:event': (data: { type: string; payload?: any }) => void;
+  'game:end': (data: { reason?: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -204,6 +210,12 @@ export interface ClientToServerEvents {
   // Предстартовая очередь
   'prelaunch:subscribe': () => void;
   'prelaunch:unsubscribe': () => void;
+
+  // Мини-игры
+  'game:invite': (data: { chatId: string; gameId: string }) => void;
+  'game:respond': (data: { chatId: string; accept: boolean }) => void;
+  'game:event': (data: { chatId: string; type: string; payload?: any }) => void;
+  'game:leave': (data: { chatId: string }) => void;
 }
 
 export interface SocketData {
