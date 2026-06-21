@@ -98,7 +98,7 @@ export const registerWeb = async (req: Request, res: Response): Promise<void> =>
       referralCode = await ReferralService.ensureReferralCode(String(user._id));
     } catch {}
 
-    const token = await createAndSaveToken(user, req, PLATFORM);
+    const token = await createAndSaveToken(user, req, PLATFORM, '30d');
 
     logger.info('web_register_success', { userId: String(user._id), login });
 
@@ -172,7 +172,7 @@ export const loginWeb = async (req: Request, res: Response): Promise<void> => {
       }
     }
 
-    const token = await createAndSaveToken(user, req, PLATFORM);
+    const token = await createAndSaveToken(user, req, PLATFORM, '30d');
     logger.info('web_login_success', { login });
     res.status(200).json({ token, user: publicUser(user) });
   } catch (error) {
