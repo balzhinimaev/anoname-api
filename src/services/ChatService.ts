@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import { wsLogger } from '../utils/logger';
 import { SearchService } from './SearchService';
 import { BlockService } from './BlockService';
+import { gameManager } from './GameService';
 
 export class ChatService {
   static async sendMessage(
@@ -150,6 +151,15 @@ export class ChatService {
       endedBy: userId,
       reason,
     });
+
+    // Завершаем мини-игру, если была активна: освобождаем память сессии и
+    // закрываем игровой оверлей у обоих игроков (иначе он «зависнет» после чата).
+    try {
+      gameManager.endForChat(chatId);
+      wsManager.io.to(`chat:${chatId}`).emit('game:end', { reason: 'chat_ended' });
+    } catch (gameCleanupError) {
+      wsLogger.warn('chat_end_game_cleanup', (gameCleanupError as Error).message, { chatId });
+    }
 
     wsLogger.info('chat_ended', `Chat ${chatId} ended by user ${userId}`, {
       reason,
