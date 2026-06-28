@@ -22,6 +22,7 @@ import { gameManager, OutEvent } from '../services/GameService';
 const pendingSearchCancellations = new Map<string, NodeJS.Timeout>();
 const pendingChatEndTimers: Map<string, NodeJS.Timeout> = new Map(); // chatId -> timer
 const pendingChatEndDeadlines: Map<string, number> = new Map(); // chatId -> expiresAt timestamp
+const CHAT_GRACE_MS = 30000; // льготный период на переподключение
 
 function mapDisconnectReason(reason: string): 'tma_closed' | 'network' | 'unknown' {
   const r = (reason || '').toLowerCase();
@@ -383,21 +384,19 @@ export class WebSocketManager {
           this.userRooms.get(userId)?.add(roomName);
           wsLogger.event('chat_join', userId, socket.id, { chatId });
 
-          // Если был таймер завершения — снимем его на явный join и уведомим партнёра, что пользователь онлайн
-          const endTimer = pendingChatEndTimers.get(chatId);
-          if (endTimer) {
-            clearTimeout(endTimer);
-            pendingChatEndTimers.delete(chatId);
-            wsLogger.info('chat_end_timer_cleared_on_join', `Cleared chat end timer for chat ${chatId} after join by user ${userId}`, { userId, chatId });
-          }
-
           const otherParticipant = chat.participants.find((p) => p.toString() !== userId)?.toString();
           if (otherParticipant) {
-            this.sendToUser(otherParticipant, 'chat:partner_status', {
-              chatId,
-              userId,
-              status: 'online'
-            });
+            if (this.userSockets.has(otherParticipant)) {
+              // Оба онлайн → снимаем grace-таймер и уведомляем партнёра.
+              this.disarmChatEndTimer(chatId);
+              this.sendToUser(otherParticipant, 'chat:partner_status', { chatId, userId, status: 'online' });
+              wsLogger.info('chat_end_timer_cleared_on_join', `Both online for chat ${chatId} after join by ${userId}`, { userId, chatId });
+            } else {
+              // Партнёр оффлайн → НЕ снимаем его grace, держим/обновляем таймер на обоих.
+              this.armChatEndTimer(chatId, [userId, otherParticipant]);
+            }
+          } else {
+            this.disarmChatEndTimer(chatId);
           }
         } catch (error) {
           wsLogger.error('chat_join_handler', userId, error as Error, { chatId });
@@ -745,21 +744,6 @@ export class WebSocketManager {
       const otherParticipant = activeChat.participants.find(p => p.toString() !== userId)?.toString();
       if (!otherParticipant) return;
 
-      // Если уже есть запущенный таймер завершения — отменяем и уведомляем собеседника, что пользователь вернулся
-      const endTimer = pendingChatEndTimers.get(chatId);
-      if (endTimer) {
-        clearTimeout(endTimer);
-        pendingChatEndTimers.delete(chatId);
-        pendingChatEndDeadlines.delete(chatId);
-        this.sendToUser(otherParticipant, 'chat:partner_status', {
-          chatId,
-          userId,
-          status: 'online',
-          serverNow: new Date().toISOString()
-        });
-        wsLogger.info('chat_end_timer_cleared_on_connect', `Cleared chat end timer for chat ${chatId} after user ${userId} connected`, { userId, chatId });
-      }
-
       // Авто-присоединяем текущий сокет к комнате активного чата, чтобы гарантировать доставку событий
       const roomName = `chat:${chatId}`;
       try {
@@ -770,37 +754,29 @@ export class WebSocketManager {
         wsLogger.warn('chat_auto_join_on_connect_failed', (joinError as Error).message, { userId, chatId });
       }
 
-      // Если собеседник пока не онлайн на этом инстансе — сообщаем текущему пользователю и запускаем таймер
-      if (!this.userSockets.has(otherParticipant)) {
-        // Уведомляем текущего пользователя, что партнер оффлайн
-        const deadline = pendingChatEndDeadlines.get(chatId);
+      if (this.userSockets.has(otherParticipant)) {
+        // Оба онлайн → снимаем grace-таймер и сообщаем партнёру, что пользователь вернулся.
+        this.disarmChatEndTimer(chatId);
+        this.sendToUser(otherParticipant, 'chat:partner_status', {
+          chatId,
+          userId,
+          status: 'online',
+          serverNow: new Date().toISOString()
+        });
+        wsLogger.info('chat_end_timer_cleared_on_connect', `Both online for chat ${chatId} after user ${userId} connected`, { userId, chatId });
+      } else {
+        // Партнёр всё ещё оффлайн → (пере)ставим grace-таймер на ОБОИХ участников и
+        // отдаём корректный отсчёт текущему пользователю (раньше тут терялся deadline,
+        // а реконнект ошибочно снимал таймер партнёра).
+        const expiresAt = this.armChatEndTimer(chatId, [userId, otherParticipant]);
         this.sendToUser(userId, 'chat:partner_status', {
           chatId,
           userId: otherParticipant,
           status: 'offline',
-          reconnectExpiresAt: deadline ? new Date(deadline).toISOString() : undefined,
+          reconnectExpiresAt: new Date(expiresAt).toISOString(),
           serverNow: new Date().toISOString(),
           reason: 'unknown'
         });
-
-        // Запускаем 30-секундный таймер завершения, если его ещё нет
-        if (!pendingChatEndTimers.has(chatId)) {
-          const expiresAt = Date.now() + 30000;
-          pendingChatEndDeadlines.set(chatId, expiresAt);
-          const chatEndTimeout = setTimeout(async () => {
-            if (!this.userSockets.has(otherParticipant)) {
-              wsLogger.info('chat_end_timer_fired_after_restart', `Ending chat ${chatId} as user ${otherParticipant} did not reconnect in time.`, { userId, chatId });
-              try {
-                await ChatService.endChat(chatId, otherParticipant, 'partner_disconnected');
-              } catch (error) {
-                wsLogger.error('chat_end_on_timeout_after_restart_error', userId, error as Error, { chatId });
-              }
-            }
-            pendingChatEndTimers.delete(chatId);
-            pendingChatEndDeadlines.delete(chatId);
-          }, 30000);
-          pendingChatEndTimers.set(chatId, chatEndTimeout);
-        }
       }
     } catch (error) {
       wsLogger.error('post_connect_presence', userId, error as Error);
@@ -858,6 +834,40 @@ export class WebSocketManager {
     socket.emit('connection:recovered');
   }
 
+  /**
+   * Ставит/обновляет grace-таймер чата. Чистит существующий (без таймеров-сирот),
+   * и при срабатывании завершает чат, если ХОТЯ БЫ ОДИН участник всё ещё оффлайн
+   * (надёжно при дисконнекте обоих и независимо от того, кто поставил таймер).
+   */
+  private armChatEndTimer(chatId: string, participants: string[]): number {
+    const existing = pendingChatEndTimers.get(chatId);
+    if (existing) clearTimeout(existing);
+    const expiresAt = Date.now() + CHAT_GRACE_MS;
+    pendingChatEndDeadlines.set(chatId, expiresAt);
+    const timeout = setTimeout(async () => {
+      pendingChatEndTimers.delete(chatId);
+      pendingChatEndDeadlines.delete(chatId);
+      const offline = participants.filter((p) => !this.userSockets.has(p));
+      if (offline.length > 0) {
+        try {
+          await ChatService.endChat(chatId, offline[0], 'partner_disconnected');
+        } catch (error) {
+          wsLogger.error('chat_end_on_timeout_error', offline[0], error as Error, { chatId });
+        }
+      }
+    }, CHAT_GRACE_MS);
+    pendingChatEndTimers.set(chatId, timeout);
+    return expiresAt;
+  }
+
+  /** Снимает grace-таймер чата (оба участника снова онлайн). */
+  private disarmChatEndTimer(chatId: string): void {
+    const existing = pendingChatEndTimers.get(chatId);
+    if (existing) clearTimeout(existing);
+    pendingChatEndTimers.delete(chatId);
+    pendingChatEndDeadlines.delete(chatId);
+  }
+
   private async handleFullDisconnect(userId: string, reason: string, duration: number) {
     // Логика отмены поиска
     SearchService.getUserActiveSearch(userId).then(activeSearch => {
@@ -889,9 +899,9 @@ export class WebSocketManager {
         const otherParticipantId = activeChat.participants.find(p => p.toString() !== userId)?.toString();
         
         if (otherParticipantId) {
-          // Уведомляем другого участника, что партнер отключился
-          const expiresAt = Date.now() + 30000;
-          pendingChatEndDeadlines.set(chatId, expiresAt);
+          // Ставим единый grace-таймер на ОБОИХ участников (чистит сироты, при срабатывании
+          // завершает чат, если хотя бы один всё ещё оффлайн) и уведомляем партнёра.
+          const expiresAt = this.armChatEndTimer(chatId, [userId, otherParticipantId]);
           this.sendToUser(otherParticipantId, 'chat:partner_status', {
             chatId,
             userId,
@@ -900,24 +910,7 @@ export class WebSocketManager {
             serverNow: new Date().toISOString(),
             reason: mapDisconnectReason(reason)
           });
-          
-          wsLogger.info('chat_disconnect_detected', `User ${userId} disconnected from active chat ${chatId}. Starting 30s end timer.`, { userId, chatId, otherParticipantId });
-
-          const chatEndTimeout = setTimeout(async () => {
-            // Проверяем, не переподключился ли пользователь
-            if (!this.userSockets.has(userId)) {
-              wsLogger.info('chat_end_timer_fired', `Ending chat ${chatId} as user ${userId} did not reconnect in time.`, { userId, chatId });
-              try {
-                await ChatService.endChat(chatId, userId, 'partner_disconnected');
-              } catch (error) {
-                wsLogger.error('chat_end_on_timeout_error', userId, error as Error, { chatId });
-              }
-            }
-            pendingChatEndTimers.delete(chatId);
-            pendingChatEndDeadlines.delete(chatId);
-          }, 30000); // 30-секундный льготный период
-
-          pendingChatEndTimers.set(chatId, chatEndTimeout);
+          wsLogger.info('chat_disconnect_detected', `User ${userId} disconnected from active chat ${chatId}. Starting ${CHAT_GRACE_MS}ms end timer.`, { userId, chatId, otherParticipantId });
         }
       }
     }).catch(error => {
