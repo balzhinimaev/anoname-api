@@ -164,4 +164,11 @@ describe('авторизация участников', () => {
     const gm = new GameManager();
     expect(gm.event('nope', A, 'draw', {})).toEqual([]);
   });
+
+  it('повторное приглашение во время активной игры игнорируется (не сбрасывает игру)', () => {
+    const { gm } = startGame();
+    expect(gm.invite(CHAT, A, 'draw-guess', PLAYERS)).toEqual([]);
+    // игра всё ещё активна — событие рисующего обрабатывается
+    expect(gm.event(CHAT, A, 'draw', { x0: 0, y0: 0, x1: 1, y1: 1 })).toHaveLength(1);
+  });
 });

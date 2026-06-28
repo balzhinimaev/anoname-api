@@ -159,6 +159,8 @@ export class GameManager {
     if (!def) return [];
     const other = players.find((p) => p !== fromUserId);
     if (!other) return [];
+    // Не перетираем уже идущую игру повторным приглашением.
+    if (this.sessions.get(chatId)?.status === 'active') return [];
     this.sessions.set(chatId, { def, players, inviterId: fromUserId, status: 'pending' });
     return [{ toUserId: other, event: 'game:invite', data: { gameId: def.id, by: fromUserId, title: def.title } }];
   }
