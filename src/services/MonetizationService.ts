@@ -136,31 +136,8 @@ export class MonetizationService {
   /**
    * Проверяет может ли пользователь выполнить поиск
    */
-  static async canUserSearch(userId: string): Promise<{ canSearch: boolean; reason?: string }> {
-    const user = await this.ensureSubscriptionUpToDateById(userId);
-    if (!user) {
-      return { canSearch: false, reason: 'User not found' };
-    }
-
-    // Сброс лимитов если прошли сутки
-    await this.resetDailyLimitsIfNeeded(userId, user.limits);
-
-    // Проверяем подписку
-    if (user.subscription?.isActive && user.subscription.type !== 'basic') {
-      // Любая активная платная подписка даёт безлимитный поиск
-      return { canSearch: true };
-    }
-
-    // Проверяем лимиты для базовых пользователей
-    const maxSearches = user.subscription?.type === 'basic' ? 5 : 3; // базовые или без подписки
-    
-    if (!user.limits || user.limits.searchesToday >= maxSearches) {
-      return { 
-        canSearch: false, 
-        reason: `Достигнут дневной лимит поисков (${maxSearches}). Купите Premium для безлимитного поиска.` 
-      };
-    }
-
+  static async canUserSearch(_userId: string): Promise<{ canSearch: boolean; reason?: string }> {
+    // Лимиты поиска отключены — поиск безлимитный для всех пользователей.
     return { canSearch: true };
   }
 
@@ -542,18 +519,13 @@ export class MonetizationService {
     const user = await this.ensureSubscriptionUpToDateById(userId);
     if (!user) return null;
 
-    await this.resetDailyLimitsIfNeeded(userId, user.limits);
-
-    const maxSearches = user.subscription?.isActive && user.subscription.type !== 'basic' 
-      ? SUBSCRIPTION_TIERS[user.subscription.type].features.unlimitedSearches ? -1 : 5
-      : user.subscription?.type === 'basic' ? 5 : 3;
-
+    // Лимиты поиска отключены — всегда безлимит.
     return {
-      searchesToday: user.limits?.searchesToday || 0,
-      maxSearches: maxSearches,
-      unlimited: maxSearches === -1,
-      remaining: maxSearches === -1 ? -1 : Math.max(0, maxSearches - (user.limits?.searchesToday || 0)),
-      resetsAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // следующий сброс
+      searchesToday: 0,
+      maxSearches: -1,
+      unlimited: true,
+      remaining: -1,
+      resetsAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       subscriptionType: user.subscription?.type || 'free'
     };
   }

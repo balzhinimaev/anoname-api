@@ -42,6 +42,11 @@ export class WebSocketManager {
   private wsRateBuckets: Map<string, { tokens: number; lastRefill: number }> = new Map();
   private readonly WS_BUCKET_CAPACITY = 20; // максимум событий за окно
   private readonly WS_BUCKET_REFILL_MS = 10_000; // окно 10 сек
+  // Sweep «зомби»-чатов (active с обоими офлайн после потери in-memory таймеров при рестарте).
+  // Чат завершается, только если он кандидат (оба офлайн + нет grace-таймера) ДВА прохода
+  // подряд — это переживает окно переподключения после рестарта.
+  private zombieSuspects = new Set<string>();
+  private readonly ZOMBIE_SWEEP_MS = 60_000;
 
   constructor(httpServer: HttpServer) {
     const socketCorsOrigin = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
@@ -97,6 +102,44 @@ export class WebSocketManager {
 
     this.io.use(socketAuth);
     this.initializeEventHandlers();
+    this.startZombieSweep();
+  }
+
+  /**
+   * Периодически завершает «зомби»-чаты: active с обоими участниками оффлайн и без
+   * grace-таймера (например, после рестарта сервера, когда in-memory таймеры потеряны).
+   * Безопасность: чат завершается только если он остаётся кандидатом ДВА прохода подряд
+   * (~60–120с) — это переживает окно переподключения пользователей после рестарта.
+   */
+  private startZombieSweep(): void {
+    setInterval(() => {
+      this.sweepStaleChats().catch((e) => wsLogger.error('zombie_sweep', 'system', e as Error));
+    }, this.ZOMBIE_SWEEP_MS);
+  }
+
+  private async sweepStaleChats(): Promise<void> {
+    const active = await Chat.find({ isActive: true }).select('participants').lean();
+    const stillSuspect = new Set<string>();
+    for (const chat of active) {
+      const chatId = String(chat._id);
+      // Нормальный grace-флоу сам разберётся — не вмешиваемся.
+      if (pendingChatEndTimers.has(chatId)) continue;
+      const allOffline = (chat.participants as any[]).every((p) => !this.userSockets.has(p.toString()));
+      if (!allOffline) continue;
+      if (this.zombieSuspects.has(chatId)) {
+        // Кандидат второй проход подряд → это зомби, завершаем.
+        try {
+          await ChatService.endChat(chatId, (chat.participants as any[])[0].toString(), 'partner_disconnected');
+          wsLogger.info('zombie_chat_ended', `Swept stale active chat ${chatId} (both offline, no timer)`, { chatId });
+        } catch (e) {
+          // 'already ended' и т.п. — игнорируем
+          wsLogger.warn('zombie_sweep_end', (e as Error).message, { chatId });
+        }
+      } else {
+        stillSuspect.add(chatId); // первый раз кандидат → проверим в следующий проход
+      }
+    }
+    this.zombieSuspects = stillSuspect;
   }
 
   // Простой токен-бакет per userId
