@@ -4,10 +4,10 @@ import { BlockService } from '../services/BlockService';
 import { ReferralService } from '../services/ReferralService';
 import { MonetizationService } from "../services/MonetizationService";
 
-// Поля, доступные для просмотра другими пользователями (публичный профиль)
+// Поля, доступные для просмотра другими пользователями (публичный профиль).
+// Идентифицирующие поля (telegramId/username/lastActive) исключены намеренно:
+// их выдача любому по предсказуемому telegramId ломает анонимность (деанон/перебор).
 const PUBLIC_USER_PROJECTION = {
-	telegramId: 1,
-	username: 1,
 	firstName: 1,
 	gender: 1,
 	age: 1,
@@ -15,14 +15,11 @@ const PUBLIC_USER_PROJECTION = {
 	profilePhoto: 1,
 	rating: 1,
 	isOnline: 1,
-	lastActive: 1,
 	cohort: 1,
 	_id: 0,
 } as const;
 
 const toPublicUser = (user: any) => ({
-	telegramId: user.telegramId,
-	username: user.username,
 	firstName: user.firstName,
 	gender: user.gender,
 	age: user.age,
@@ -30,7 +27,6 @@ const toPublicUser = (user: any) => ({
 	profilePhoto: user.profilePhoto,
 	rating: user.rating,
 	isOnline: user.isOnline,
-	lastActive: user.lastActive,
 	cohort: user.cohort,
 });
 

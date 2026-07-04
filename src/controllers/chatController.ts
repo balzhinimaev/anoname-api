@@ -6,6 +6,11 @@ import Message from '../models/Message';
 import Rating from '../models/Rating';
 import { ChatService } from '../services/ChatService';
 
+// Безопасная проекция участника чата: только неидентифицирующие поля.
+// НИКОГДА не отдаём telegramId/username/lastName/passwordHash собеседнику
+// в анонимном чате (иначе деанон). _id включается populate по умолчанию.
+const PUBLIC_PARTICIPANT_FIELDS = 'firstName profilePhoto photos gender age rating isOnline';
+
 export const createChat = async (req: Request, res: Response): Promise<void> => {
   try {
     const { participants, type } = req.body;
@@ -68,7 +73,7 @@ export const getUserChats = async (req: Request, res: Response): Promise<void> =
         { participants: authUserId, isActive: false, savedBy: authUserId },
       ]
     })
-      .populate('participants', '')
+      .populate('participants', PUBLIC_PARTICIPANT_FIELDS)
       .populate('lastMessage');
 
     res.status(200).json(chats);
@@ -85,7 +90,7 @@ export const getChatMessages = async (req: Request, res: Response): Promise<void
       res.status(401).json({ error: 'Не авторизован' });
       return;
     }
-    const limit = parseInt(req.query.limit as string) || 50;
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
     const before = req.query.before as string; // message ID или ISO дата
     const after = req.query.after as string;   // message ID или ISO дата (для получения пропущенных сообщений)
 
@@ -136,7 +141,7 @@ export const getChatMessages = async (req: Request, res: Response): Promise<void
     const messages = await Message.find(query)
       .limit(limit)
       .sort({ timestamp: sortDirection })
-      .populate('sender', '');
+      .populate('sender', PUBLIC_PARTICIPANT_FIELDS);
 
     if (!messages) {
       res.status(404).json({ error: 'Сообщения не найдены' });
@@ -218,7 +223,7 @@ export const getSavedChats = async (req: Request, res: Response): Promise<void> 
     }
 
     const chats = await Chat.find({ savedBy: authUserId })
-      .populate('participants', '')
+      .populate('participants', PUBLIC_PARTICIPANT_FIELDS)
       .populate('lastMessage');
 
     res.status(200).json(chats);
@@ -372,7 +377,7 @@ export const getUserChatHistory = async (req: Request, res: Response): Promise<v
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate('participants', '')
+      .populate('participants', PUBLIC_PARTICIPANT_FIELDS)
       .populate('lastMessage');
 
     const pageChatIds = chatsPage.map((c) => c._id);

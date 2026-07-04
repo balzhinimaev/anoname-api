@@ -474,13 +474,8 @@ export class WebSocketManager {
           const duration = Date.now() - startTime;
           metricsCollector.messageProcessed(duration);
 
-          // После успешной обработки сообщения — подтверждение доставки
-          this.sendToUser(userId, 'chat:message', {
-            chatId: data.chatId,
-            // Подтверждение фактом ретрансляции не всегда очевидно клиенту,
-            // но мы уже эмитим фактическое сообщение всем участникам в ChatService.
-            // Здесь дополнительный эмит не нужен — оставлено как комментарий.
-          } as any);
+          // Фактическое сообщение уже разослано всем участникам комнаты в ChatService;
+          // дополнительный пустой эмит отправителю не нужен (создавал пустой пузырь на клиенте).
         }).catch(error => {
           metricsCollector.errorOccurred(error as Error);
           wsLogger.error(userId, socket.id, error as Error, { 
@@ -693,8 +688,14 @@ export class WebSocketManager {
       });
 
       // Обработчики контактов
-      socket.on('contact:request', (data) => this.handleContactRequest(socket, data));
-      socket.on('contact:respond', (data) => this.handleContactResponse(socket, data));
+      socket.on('contact:request', (data) => {
+        if (!this.wsRateAllow(userId)) { metricsCollector.wsRateLimited('contact:request'); return; }
+        this.handleContactRequest(socket, data);
+      });
+      socket.on('contact:respond', (data) => {
+        if (!this.wsRateAllow(userId)) { metricsCollector.wsRateLimited('contact:respond'); return; }
+        this.handleContactResponse(socket, data);
+      });
 
       // Обработчики блокировок
       socket.on('user:block', async (data) => {
@@ -1248,19 +1249,40 @@ export class WebSocketManager {
     }
   }
 
+  // Проверяет, что fromUserId и targetId состоят в одном активном чате.
+  // Возвращает _id чата или null. Защищает contact:* от спама/фишинга произвольным userId.
+  private async sharedActiveChat(fromUserId: string, targetId: string): Promise<string | null> {
+    const isObjectId = (id: string) => /^[a-f\d]{24}$/i.test(id);
+    if (!isObjectId(fromUserId) || !isObjectId(targetId) || fromUserId === targetId) return null;
+    const chat = await Chat.findOne({
+      participants: { $all: [new mongoose.Types.ObjectId(fromUserId), new mongoose.Types.ObjectId(targetId)] },
+      isActive: true,
+    }).select('_id');
+    return chat ? chat._id.toString() : null;
+  }
+
   private async handleContactRequest(socket: TypedSocket, data: any) {
-    const fromUserId = socket.data.user._id.toString();
-    this.sendToUser(data.to, 'contact:request', {
-      from: fromUserId,
-      chatId: data.chatId
-    });
+    try {
+      const fromUserId = socket.data.user._id.toString();
+      const targetId = String(data?.to || '');
+      const chatId = await this.sharedActiveChat(fromUserId, targetId);
+      if (!chatId) { socket.emit('error', { message: 'Forbidden' }); return; }
+      this.sendToUser(targetId, 'contact:request', { from: fromUserId, chatId });
+    } catch (e) {
+      wsLogger.error('contact_request', socket.data.user?._id?.toString() || '', e as Error);
+    }
   }
 
   private async handleContactResponse(socket: TypedSocket, data: any) {
-    const responderId = socket.data.user._id.toString();
-    this.sendToUser(data.userId, 'contact:status', {
-      userId: responderId,
-      status: data.status
-    });
+    try {
+      const responderId = socket.data.user._id.toString();
+      const targetId = String(data?.userId || '');
+      const status = data?.status === 'accepted' ? 'accepted' : 'declined';
+      const chatId = await this.sharedActiveChat(responderId, targetId);
+      if (!chatId) { socket.emit('error', { message: 'Forbidden' }); return; }
+      this.sendToUser(targetId, 'contact:status', { userId: responderId, status });
+    } catch (e) {
+      wsLogger.error('contact_respond', socket.data.user?._id?.toString() || '', e as Error);
+    }
   }
 } 

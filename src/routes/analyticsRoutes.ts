@@ -1,6 +1,6 @@
 import express, { Request } from 'express';
 import logger from '../utils/logger';
-import { authMiddleware } from '../middleware/authMiddleware';
+import { authMiddleware, requireAdmin } from '../middleware/authMiddleware';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { getSummary, getTimeseries, getABConversion, getFunnel, getTimingSeries } from '../controllers/analyticsController';
 
@@ -49,10 +49,10 @@ router.post('/event', authMiddleware as express.RequestHandler, async (req: Requ
 });
 
 // Агрегированные отчёты
-router.get('/summary', authMiddleware as express.RequestHandler, getSummary as express.RequestHandler);
-router.get('/timeseries', authMiddleware as express.RequestHandler, getTimeseries as express.RequestHandler);
-router.get('/ab-conversion', authMiddleware as express.RequestHandler, getABConversion as express.RequestHandler);
-router.post('/funnel', authMiddleware as express.RequestHandler, getFunnel as express.RequestHandler);
-router.get('/timing-series', authMiddleware as express.RequestHandler, getTimingSeries as express.RequestHandler);
+router.get('/summary', authMiddleware as express.RequestHandler, requireAdmin as express.RequestHandler, getSummary as express.RequestHandler);
+router.get('/timeseries', authMiddleware as express.RequestHandler, requireAdmin as express.RequestHandler, getTimeseries as express.RequestHandler);
+router.get('/ab-conversion', authMiddleware as express.RequestHandler, requireAdmin as express.RequestHandler, getABConversion as express.RequestHandler);
+router.post('/funnel', authMiddleware as express.RequestHandler, requireAdmin as express.RequestHandler, getFunnel as express.RequestHandler);
+router.get('/timing-series', authMiddleware as express.RequestHandler, requireAdmin as express.RequestHandler, getTimingSeries as express.RequestHandler);
 
 
