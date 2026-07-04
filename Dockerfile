@@ -1,7 +1,7 @@
 # Multi-stage Dockerfile для production сборки
 
 # Стадия 1: Сборка приложения
-FROM node:18-alpine AS builder
+FROM node:22-alpine AS builder
 
 # Устанавливаем рабочую директорию
 WORKDIR /app
@@ -20,7 +20,7 @@ COPY tsconfig.json ./
 RUN npm run build
 
 # Стадия 2: Production образ
-FROM node:18-alpine AS production
+FROM node:22-alpine AS production
 
 # Устанавливаем рабочую директорию
 WORKDIR /app
