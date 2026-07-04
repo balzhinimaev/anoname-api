@@ -243,9 +243,12 @@ const startServer = async () => {
       logger.error('Uncaught exception', { error: err instanceof Error ? { message: err.message, stack: err.stack } : err });
       await handleShutdown('UNCAUGHT_EXCEPTION');
     });
-    process.on('unhandledRejection', async (reason: any) => {
-      logger.error('Unhandled rejection', { reason });
-      await handleShutdown('UNHANDLED_REJECTION');
+    // ВАЖНО: unhandledRejection НЕ роняет сервер — один пропущенный .catch
+    // в fire-and-forget промисе не должен обрывать все WS-чаты и in-memory игры.
+    // Логируем и продолжаем; критичные ошибки всплывут в метриках/логах.
+    process.on('unhandledRejection', (reason: any) => {
+      logger.error('Unhandled rejection (продолжаем работу)', { reason });
+      if (reason instanceof Error) metricsCollector.errorOccurred(reason);
     });
 
     // Периодическая валидация онлайн-статуса по lastActive (TTL 60с)

@@ -51,5 +51,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     process.exit(res.statusCode === 200 ? 0 : 1) \
   }).on('error', () => process.exit(1))"
 
-# Запуск приложения
-CMD ["npm", "start"]
+# Запуск приложения напрямую через node — надёжный проброс SIGTERM
+# (npm как PID 1 не всегда форвардит сигнал → graceful shutdown не срабатывал).
+CMD ["node", "dist/server.js"]

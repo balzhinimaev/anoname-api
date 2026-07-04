@@ -163,6 +163,17 @@ export const yookassaWebhook = async (req: Request, res: Response): Promise<void
       }
     }
 
+    // Fail-closed: в prod-режиме вебхук ОБЯЗАН быть подтверждён хотя бы одним
+    // способом (basic-auth ИЛИ подпись тела). Иначе поддельное уведомление с
+    // подобранным paymentId могло бы активировать премиум без реальной оплаты.
+    const basicAuthConfigured = Boolean(config.yookassa.webhookUser && config.yookassa.webhookPassword);
+    const signaturePresent = Boolean(signatureHeader);
+    if (config.yookassa.mode === 'prod' && !basicAuthConfigured && !signaturePresent) {
+      logger.warn('YooKassa webhook rejected: не настроена верификация в prod', { type: 'yookassa_webhook_unverified' });
+      res.status(401).json({ error: 'Webhook verification required' });
+      return;
+    }
+
     const event = req.body || {};
     // Simple validation: ожидаем объект уведомления с payment.id
     const paymentId = event?.object?.id || event?.payment?.id || event?.id;

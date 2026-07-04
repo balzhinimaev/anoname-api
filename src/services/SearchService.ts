@@ -626,6 +626,20 @@ export class SearchService {
       } catch (error: any) {
         lastError = error;
         try { await session.endSession(); } catch {}
+        // Идемпотентность против встречной гонки: если ЭТОТ поиск уже переведён
+        // в matched параллельной транзакцией — матч фактически состоялся, а
+        // победившая сторона уже отправила search:matched обоим. Не бросаем
+        // ошибку, иначе юзер получил бы search:error поверх search:matched.
+        try {
+          const cur = await Search.findById(search1._id);
+          if (cur?.status === 'matched') {
+            wsLogger.warn('create_match_tx', 'уже matched встречной транзакцией — идемпотентный успех', {
+              attempt,
+              search1Id: String(search1._id)
+            });
+            return null;
+          }
+        } catch {}
         wsLogger.warn('create_match_tx', error?.message || String(error), {
           attempt,
           search1Id: String(search1._id),
