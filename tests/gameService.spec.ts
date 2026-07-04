@@ -1,18 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
-import { GameManager, OutEvent, TARGET_SCORE, ROUND_SECONDS } from '../src/services/GameService';
+import { GameManager, OutEvent, TARGET_SCORE, ROUND_SECONDS, CHOOSE_SECONDS, CHOICE_COUNT } from '../src/services/GameService';
 
 const CHAT = 'c1';
 const A = 'userA';
 const B = 'userB';
 const PLAYERS: [string, string] = [A, B];
 
-/** Заводит активную игру (A — стартующий/рисующий) и возвращает менеджер + слово рисующего. */
-function startGame(): { gm: GameManager; word: string } {
+/** Кандидаты слов, предложенные пользователю в game:choose (undefined у угадывающего). */
+function wordsFor(out: OutEvent[], user: string): string[] | undefined {
+  const e = out.find((x) => x.toUserId === user && x.event === 'game:choose') as any;
+  return e ? (e.data.words as string[] | undefined) : undefined;
+}
+
+/** Рисующий выбирает кандидата idx → game:start обоим. */
+function pick(gm: GameManager, drawer: string, idx = 0): OutEvent[] {
+  return gm.event(CHAT, drawer, 'pick', { index: idx });
+}
+
+/** Полный старт до фазы рисования (A — рисующий) и слово рисующего. */
+function startGame(): { gm: GameManager; word: string; startOut: OutEvent[] } {
   const gm = new GameManager();
   gm.invite(CHAT, A, 'draw-guess', PLAYERS);
-  const out = gm.respond(CHAT, B, true);
-  const startA = out.find((e) => e.toUserId === A && e.event === 'game:start') as any;
-  return { gm, word: startA.data.word as string };
+  gm.respond(CHAT, B, true); // → game:choose
+  const startOut = pick(gm, A, 0); // → game:start
+  const startA = startOut.find((e) => e.toUserId === A && e.event === 'game:start') as any;
+  return { gm, word: startA.data.word as string, startOut };
 }
 
 describe('GameManager.catalog', () => {
@@ -35,21 +47,21 @@ describe('invite / respond', () => {
     expect(gm.invite(CHAT, A, 'no-such', PLAYERS)).toEqual([]);
   });
 
-  it('accept → game:start обоим: рисующий со словом, угадывающий без; счёт 0:0', () => {
+  it('accept → game:choose обоим: рисующему N слов на выбор, угадывающему — ожидание; счёт 0:0', () => {
     const gm = new GameManager();
     gm.invite(CHAT, A, 'draw-guess', PLAYERS);
     const out = gm.respond(CHAT, B, true);
-    const starts = out.filter((e) => e.event === 'game:start');
-    expect(starts).toHaveLength(2);
-    const a = starts.find((e) => e.toUserId === A)!.data as any;
-    const b = starts.find((e) => e.toUserId === B)!.data as any;
+    const chooses = out.filter((e) => e.event === 'game:choose');
+    expect(chooses).toHaveLength(2);
+    const a = chooses.find((e) => e.toUserId === A)!.data as any;
+    const b = chooses.find((e) => e.toUserId === B)!.data as any;
     expect(a.role).toBe('drawer');
-    expect(typeof a.word).toBe('string');
-    expect(a.word.length).toBeGreaterThan(0);
+    expect(Array.isArray(a.words)).toBe(true);
+    expect(a.words).toHaveLength(CHOICE_COUNT);
+    expect(new Set(a.words).size).toBe(CHOICE_COUNT); // слова различны
     expect(b.role).toBe('guesser');
-    expect(b.word).toBeUndefined();
+    expect(b.words).toBeUndefined();
     expect(a.myScore).toBe(0);
-    expect(a.opponentScore).toBe(0);
     expect(a.round).toBe(1);
   });
 
@@ -59,7 +71,6 @@ describe('invite / respond', () => {
     const out = gm.respond(CHAT, B, false);
     expect(out.every((e) => e.event === 'game:end')).toBe(true);
     expect(out.map((e) => e.toUserId).sort()).toEqual([A, B]);
-    // после decline события игры игнорируются
     expect(gm.event(CHAT, A, 'draw', {})).toEqual([]);
   });
 
@@ -67,6 +78,48 @@ describe('invite / respond', () => {
     const gm = new GameManager();
     gm.invite(CHAT, A, 'draw-guess', PLAYERS);
     expect(gm.respond(CHAT, A, true)).toEqual([]);
+  });
+});
+
+describe('выбор слова (choose phase)', () => {
+  it('pick рисующим → game:start обоим: рисующему выбранное слово, угадывающему маска', () => {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    const chooseOut = gm.respond(CHAT, B, true);
+    const words = wordsFor(chooseOut, A)!;
+    const out = pick(gm, A, 1);
+    const starts = out.filter((e) => e.event === 'game:start');
+    expect(starts).toHaveLength(2);
+    const a = starts.find((e) => e.toUserId === A)!.data as any;
+    const b = starts.find((e) => e.toUserId === B)!.data as any;
+    expect(a.word).toBe(words[1]); // выбрано именно то слово
+    expect(b.word).toBeUndefined();
+    expect(typeof b.mask).toBe('string');
+  });
+
+  it('pick с неверным индексом игнорируется (остаёмся в выборе)', () => {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    gm.respond(CHAT, B, true);
+    expect(pick(gm, A, 99)).toEqual([]);
+    // всё ещё выбор: рисование не работает, а корректный pick — работает
+    expect(gm.event(CHAT, A, 'draw', { x0: 0, y0: 0, x1: 1, y1: 1 })).toEqual([]);
+    expect(pick(gm, A, 0).some((e) => e.event === 'game:start')).toBe(true);
+  });
+
+  it('pick от угадывающего игнорируется', () => {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    gm.respond(CHAT, B, true);
+    expect(pick(gm, B, 0)).toEqual([]);
+  });
+
+  it('guess во время выбора игнорируется', () => {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    const chooseOut = gm.respond(CHAT, B, true);
+    const words = wordsFor(chooseOut, A)!;
+    expect(gm.event(CHAT, B, 'guess', { text: words[0] })).toEqual([]);
   });
 });
 
@@ -95,13 +148,13 @@ describe('рисование (draw/clear)', () => {
 describe('угадывание (guess)', () => {
   it('неверная догадка → показывается ТОЛЬКО рисующему', () => {
     const { gm } = startGame();
-    const out = gm.event(CHAT, B, 'guess', { text: '___заведомо неверно___' });
+    const out = gm.event(CHAT, B, 'guess', { text: 'йцукенгшщзхъ' });
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ toUserId: A, event: 'game:event' });
     expect((out[0].data as any).type).toBe('guess');
   });
 
-  it('верная догадка → correct обоим + новый раунд: роли меняются, счёт угадавшему', () => {
+  it('верная догадка → correct обоим + новый раунд (game:choose): роли меняются, счёт угадавшему', () => {
     const { gm, word } = startGame();
     const out = gm.event(CHAT, B, 'guess', { text: word });
 
@@ -109,17 +162,18 @@ describe('угадывание (guess)', () => {
     expect(correct.map((e) => e.toUserId).sort()).toEqual([A, B]);
     expect((correct[0].data as any).payload.word).toBe(word);
 
-    const starts = out.filter((e) => e.event === 'game:start');
-    expect(starts).toHaveLength(2);
-    const bStart = starts.find((e) => e.toUserId === B)!.data as any;
-    const aStart = starts.find((e) => e.toUserId === A)!.data as any;
-    // Угадавший (B) теперь рисующий, A — угадывающий
-    expect(bStart.role).toBe('drawer');
-    expect(aStart.role).toBe('guesser');
-    // Счёт: у B 1, у A 0; раунд 2
-    expect(bStart.myScore).toBe(1);
-    expect(aStart.myScore).toBe(0);
-    expect(bStart.round).toBe(2);
+    const chooses = out.filter((e) => e.event === 'game:choose');
+    expect(chooses).toHaveLength(2);
+    const bChoose = chooses.find((e) => e.toUserId === B)!.data as any;
+    const aChoose = chooses.find((e) => e.toUserId === A)!.data as any;
+    // Угадавший (B) теперь рисующий и выбирает слово, A — угадывающий (ждёт)
+    expect(bChoose.role).toBe('drawer');
+    expect(Array.isArray(bChoose.words)).toBe(true);
+    expect(aChoose.role).toBe('guesser');
+    expect(aChoose.words).toBeUndefined();
+    expect(bChoose.myScore).toBe(1);
+    expect(aChoose.myScore).toBe(0);
+    expect(bChoose.round).toBe(2);
   });
 
   it('верная догадка нечувствительна к регистру/ё и пробелам', () => {
@@ -136,13 +190,13 @@ describe('угадывание (guess)', () => {
 });
 
 describe('skip и leave', () => {
-  it('skip рисующим → новое слово (другое), событие skipped обоим', () => {
-    const { gm, word } = startGame();
+  it('skip рисующим → skipped обоим + новый выбор слова (роли те же)', () => {
+    const { gm } = startGame();
     const out = gm.event(CHAT, A, 'skip', {});
     expect(out.some((e) => (e.data as any).type === 'skipped')).toBe(true);
-    const newStart = out.find((e) => e.toUserId === A && e.event === 'game:start')!.data as any;
-    expect(newStart.role).toBe('drawer'); // роли НЕ меняются при skip
-    expect(newStart.word).not.toBe(word);
+    const aChoose = out.find((e) => e.toUserId === A && e.event === 'game:choose')!.data as any;
+    expect(aChoose.role).toBe('drawer'); // роли НЕ меняются при skip
+    expect(Array.isArray(aChoose.words)).toBe(true);
   });
 
   it('leave → game:end обоим, дальнейшие события игнорируются', () => {
@@ -168,32 +222,30 @@ describe('авторизация участников', () => {
   it('повторное приглашение во время активной игры игнорируется (не сбрасывает игру)', () => {
     const { gm } = startGame();
     expect(gm.invite(CHAT, A, 'draw-guess', PLAYERS)).toEqual([]);
-    // игра всё ещё активна — событие рисующего обрабатывается
     expect(gm.event(CHAT, A, 'draw', { x0: 0, y0: 0, x1: 1, y1: 1 })).toHaveLength(1);
   });
 });
 
 describe('конец игры (победа до TARGET_SCORE)', () => {
-  /** Играет верными догадками до конца игры (очки чередуются из-за смены ролей). */
+  /** Играет верными догадками до конца (после каждого раунда новый рисующий выбирает слово). */
   function playToWin(gm: GameManager, firstWord: string): OutEvent[] {
+    let drawer = A;
     let word = firstWord;
-    let guesser = B; // A стартует рисующим
-    let out: OutEvent[] = [];
-    for (let i = 0; i < TARGET_SCORE * 2; i++) {
-      out = gm.event(CHAT, guesser, 'guess', { text: word });
+    for (let i = 0; i < TARGET_SCORE * 2 + 2; i++) {
+      const guesser = drawer === A ? B : A;
+      const out = gm.event(CHAT, guesser, 'guess', { text: word });
       if (out.some((e) => e.event === 'game:end')) return out;
-      const drawerStart = out.find((e) => e.event === 'game:start' && (e.data as any).word) as any;
-      word = drawerStart.data.word;
-      guesser = drawerStart.toUserId === A ? B : A;
+      drawer = guesser; // угадавший стал рисующим и выбирает слово
+      const startOut = pick(gm, drawer, 0);
+      const st = startOut.find((e) => e.toUserId === drawer && e.event === 'game:start') as any;
+      word = st.data.word;
     }
     throw new Error('игра не завершилась за ожидаемое число раундов');
   }
 
   it('game:start содержит roundSeconds и targetScore', () => {
-    const gm = new GameManager();
-    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
-    const out = gm.respond(CHAT, B, true);
-    const start = out.find((e) => e.event === 'game:start')!.data as any;
+    const { startOut } = startGame();
+    const start = startOut.find((e) => e.event === 'game:start')!.data as any;
     expect(start.roundSeconds).toBe(ROUND_SECONDS);
     expect(start.targetScore).toBe(TARGET_SCORE);
   });
@@ -202,9 +254,9 @@ describe('конец игры (победа до TARGET_SCORE)', () => {
     const { gm, word } = startGame();
     const out = playToWin(gm, word);
 
-    // последний ответ: correct обоим + game:end обоим, БЕЗ нового game:start
     expect(out.some((e) => (e.data as any).type === 'correct')).toBe(true);
     expect(out.some((e) => e.event === 'game:start')).toBe(false);
+    expect(out.some((e) => e.event === 'game:choose')).toBe(false);
     const ends = out.filter((e) => e.event === 'game:end');
     expect(ends).toHaveLength(2);
     const winnerEnd = ends.find((e) => (e.data as any).youWon)!.data as any;
@@ -213,73 +265,64 @@ describe('конец игры (победа до TARGET_SCORE)', () => {
     expect(winnerEnd.myScore).toBe(TARGET_SCORE);
     expect(loserEnd.opponentScore).toBe(TARGET_SCORE);
 
-    // сессия удалена — события игнорируются, можно пригласить заново
     expect(gm.event(CHAT, A, 'draw', {})).toEqual([]);
     expect(gm.invite(CHAT, A, 'draw-guess', PLAYERS)).toHaveLength(1);
   });
 });
 
-describe('таймер раунда', () => {
+describe('таймеры (выбор + раунд)', () => {
   beforeEach(() => { jest.useFakeTimers(); });
   afterEach(() => { jest.useRealTimers(); });
 
-  function startTimedGame(roundMs = 5000) {
+  /** Заводит игру и доводит до фазы рисования (A рисует), round timer = roundMs. */
+  function startDrawing(roundMs = 5000) {
     const gm = new GameManager(roundMs);
     const dispatched: OutEvent[][] = [];
     gm.setDispatcher((evts) => dispatched.push(evts));
     gm.invite(CHAT, A, 'draw-guess', PLAYERS);
-    const out = gm.respond(CHAT, B, true);
+    gm.respond(CHAT, B, true);
+    const out = pick(gm, A, 0);
     const word = (out.find((e) => e.toUserId === A && e.event === 'game:start')!.data as any).word as string;
     return { gm, dispatched, word };
   }
 
-  it('по истечении раунда: timeout со словом обоим + новый раунд со сменой ролей, очков никому', () => {
-    const { gm, dispatched, word } = startTimedGame();
-    void gm;
-    jest.advanceTimersByTime(5000);
+  it('истечение выбора → авто-выбор и game:start (диспетчер)', () => {
+    const gm = new GameManager(5000);
+    const dispatched: OutEvent[][] = [];
+    gm.setDispatcher((evts) => dispatched.push(evts));
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    gm.respond(CHAT, B, true); // фаза выбора, choice timer
+    jest.advanceTimersByTime(CHOOSE_SECONDS * 1000);
+    expect(dispatched).toHaveLength(1);
+    const starts = dispatched[0].filter((e) => e.event === 'game:start');
+    expect(starts).toHaveLength(2);
+    expect((starts.find((e) => e.toUserId === A)!.data as any).word).toBeTruthy();
+  });
 
+  it('истечение раунда → timeout обоим + новый выбор (game:choose), роли меняются', () => {
+    const { dispatched, word } = startDrawing();
+    jest.advanceTimersByTime(5000);
     expect(dispatched).toHaveLength(1);
     const out = dispatched[0];
     const timeouts = out.filter((e) => (e.data as any).type === 'timeout');
     expect(timeouts.map((e) => e.toUserId).sort()).toEqual([A, B]);
     expect((timeouts[0].data as any).payload.word).toBe(word);
-
-    const starts = out.filter((e) => e.event === 'game:start');
-    expect(starts).toHaveLength(2);
-    const bStart = starts.find((e) => e.toUserId === B)!.data as any;
-    expect(bStart.role).toBe('drawer'); // роли поменялись
-    expect(bStart.myScore).toBe(0);
-    expect(bStart.round).toBe(2);
+    const bChoose = out.find((e) => e.toUserId === B && e.event === 'game:choose')!.data as any;
+    expect(bChoose.role).toBe('drawer'); // роли поменялись
+    expect(bChoose.round).toBe(2);
   });
 
-  it('верная догадка перезапускает таймер (старый не срабатывает)', () => {
-    const { gm, dispatched, word } = startTimedGame();
+  it('верная догадка снимает round timer (старый дедлайн не срабатывает)', () => {
+    const { gm, dispatched, word } = startDrawing();
     jest.advanceTimersByTime(4000);
-    gm.event(CHAT, B, 'guess', { text: word }); // раунд закончился догадкой
-    jest.advanceTimersByTime(1500); // старый дедлайн прошёл, новый (5s) ещё нет
+    gm.event(CHAT, B, 'guess', { text: word }); // → фаза выбора (round timer снят, взведён choice 15s)
+    jest.advanceTimersByTime(1500); // старый round-дедлайн (5s) прошёл — ничего
     expect(dispatched).toHaveLength(0);
-    jest.advanceTimersByTime(3500); // истёк уже новый раунд
-    expect(dispatched).toHaveLength(1);
   });
 
   it('после leave таймер не срабатывает', () => {
-    const { gm, dispatched } = startTimedGame();
+    const { gm, dispatched } = startDrawing();
     gm.leave(CHAT, A);
-    jest.advanceTimersByTime(60000);
-    expect(dispatched).toHaveLength(0);
-  });
-
-  it('после победы таймер не срабатывает', () => {
-    const { gm, dispatched, word } = startTimedGame();
-    let w = word;
-    let guesser = B;
-    for (let i = 0; i < TARGET_SCORE * 2; i++) {
-      const out = gm.event(CHAT, guesser, 'guess', { text: w });
-      if (out.some((e) => e.event === 'game:end')) break;
-      const drawerStart = out.find((e) => e.event === 'game:start' && (e.data as any).word) as any;
-      w = drawerStart.data.word;
-      guesser = drawerStart.toUserId === A ? B : A;
-    }
     jest.advanceTimersByTime(60000);
     expect(dispatched).toHaveLength(0);
   });
@@ -287,15 +330,11 @@ describe('таймер раунда', () => {
 
 describe('подсказки: маска и «почти»', () => {
   it('угадывающий получает маску вместо слова; число точек = числу букв', () => {
-    const gm = new GameManager();
-    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
-    const out = gm.respond(CHAT, B, true);
-    const drawer = out.find((e) => e.event === 'game:start' && (e.data as any).word) as any;
-    const guesser = out.find((e) => e.event === 'game:start' && !(e.data as any).word) as any;
-    const word: string = drawer.data.word;
-    expect(guesser.data.word).toBeUndefined();
-    expect(typeof guesser.data.mask).toBe('string');
-    const dots = (guesser.data.mask.match(/•/g) || []).length;
+    const { word, startOut } = startGame();
+    const guesser = startOut.find((e) => e.toUserId === B && e.event === 'game:start')!.data as any;
+    expect(guesser.word).toBeUndefined();
+    expect(typeof guesser.mask).toBe('string');
+    const dots = (guesser.mask.match(/•/g) || []).length;
     expect(dots).toBe(word.replace(/ /g, '').length);
   });
 
@@ -305,7 +344,6 @@ describe('подсказки: маска и «почти»', () => {
     const out = gm.event(CHAT, B, 'guess', { text: near });
     expect(out.some((e) => e.toUserId === B && (e.data as any).type === 'close')).toBe(true);
     expect(out.some((e) => e.toUserId === A && (e.data as any).type === 'guess')).toBe(true);
-    // игра продолжается, счёт не меняется
     const cont = gm.event(CHAT, B, 'guess', { text: word });
     expect(cont.some((e) => (e.data as any).type === 'correct')).toBe(true);
   });

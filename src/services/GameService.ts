@@ -11,6 +11,7 @@
 export type OutEvent =
   | { toUserId: string; event: 'game:invite'; data: { gameId: string; by: string; title: string } }
   | { toUserId: string; event: 'game:start'; data: { gameId: string; role: GameRole; word?: string; mask?: string; myScore: number; opponentScore: number; round: number; roundSeconds: number; targetScore: number } }
+  | { toUserId: string; event: 'game:choose'; data: { role: GameRole; words?: string[]; chooseSeconds: number; round: number; myScore: number; opponentScore: number; targetScore: number } }
   | { toUserId: string; event: 'game:event'; data: { type: string; payload?: any } }
   | { toUserId: string; event: 'game:end'; data: { reason?: string; youWon?: boolean; myScore?: number; opponentScore?: number } };
 
@@ -18,6 +19,10 @@ export type OutEvent =
 export const ROUND_SECONDS = 90;
 /** Игра идёт до этого количества очков. */
 export const TARGET_SCORE = 5;
+/** Сколько секунд даётся рисующему на выбор слова (по истечении — авто-выбор). */
+export const CHOOSE_SECONDS = 15;
+/** Сколько слов предлагается рисующему на выбор. */
+export const CHOICE_COUNT = 3;
 
 export type GameRole = 'drawer' | 'guesser';
 
@@ -29,6 +34,8 @@ export interface GameState {
   // специфично для draw-guess
   drawerId: string;
   word: string;
+  choosing: boolean;      // рисующий сейчас выбирает слово из candidates
+  candidates: string[];   // предложенные на выбор слова (только пока choosing)
 }
 
 interface GameDefinition {
@@ -38,13 +45,16 @@ interface GameDefinition {
   init(players: [string, string], starterId: string): GameState;
   /** Роль игрока + приватные данные для game:start (рисующему — слово, угадывающему — маску). */
   startInfo(state: GameState, userId: string): { role: GameRole; word?: string; mask?: string };
-  /** Обработка in-game события. restart=true → сервер заново разошлёт game:start обоим (новый раунд). */
+  /** N уникальных слов на выбор рисующему (начало раунда). */
+  pickCandidates(count: number, exclude?: string): string[];
+  /** Обработка in-game события. restart=true → новый раунд (фаза выбора слова).
+   *  startNow=true → слово выбрано, пора начинать рисование (game:start + таймер раунда). */
   onEvent(
     state: GameState,
     fromUserId: string,
     type: string,
     payload: any
-  ): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean; winnerId?: string };
+  ): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean; startNow?: boolean; winnerId?: string };
   /** Истёк таймер раунда. Вернуть события и (обычно) restart для нового раунда. */
   onTimeout(state: GameState): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean };
 }
@@ -127,7 +137,9 @@ const drawGuess: GameDefinition = {
       scores: { [players[0]]: 0, [players[1]]: 0 },
       round: 1,
       drawerId: starterId,
-      word: pickWord(),
+      word: '',
+      choosing: false,
+      candidates: [],
     };
   },
 
@@ -138,8 +150,29 @@ const drawGuess: GameDefinition = {
       : { role, mask: maskOf(state.word) };
   },
 
+  pickCandidates(count, exclude) {
+    const out: string[] = [];
+    let guard = 0;
+    while (out.length < count && guard++ < 200) {
+      const w = pickWord(exclude);
+      if (!out.some((x) => normalize(x) === normalize(w))) out.push(w);
+    }
+    return out;
+  },
+
   onEvent(state, fromUserId, type, payload) {
     const isDrawer = fromUserId === state.drawerId;
+
+    // Фаза выбора слова: принимаем только 'pick' от рисующего.
+    if (state.choosing) {
+      if (type !== 'pick' || !isDrawer) return { events: [] };
+      const idx = Number(payload?.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= state.candidates.length) return { events: [] };
+      state.word = state.candidates[idx];
+      state.choosing = false;
+      state.candidates = [];
+      return { events: [], startNow: true };
+    }
 
     switch (type) {
       case 'draw': // штрихи: рисующий → угадывающему
@@ -150,9 +183,8 @@ const drawGuess: GameDefinition = {
         if (!isDrawer) return { events: [] };
         return { events: [{ to: 'other', type: 'clear' }] };
 
-      case 'skip': // рисующий пропускает слово → новое слово, роли те же
+      case 'skip': // рисующий пропускает слово → новый выбор, роли те же
         if (!isDrawer) return { events: [] };
-        state.word = pickWord(state.word);
         return { events: [{ to: 'both', type: 'skipped' }], restart: true };
 
       case 'guess': { // угадывающий присылает догадку
@@ -168,10 +200,9 @@ const drawGuess: GameDefinition = {
             // набрал целевой счёт — игра окончена
             return { events: [correctEvent], winnerId: fromUserId };
           }
-          // меняем рисующего, новое слово, новый раунд
+          // меняем рисующего, новый раунд (слово выберет beginRound)
           state.round += 1;
           state.drawerId = fromUserId; // угадавший становится рисующим (роли меняются)
-          state.word = pickWord(guessedWord);
           return { events: [correctEvent], restart: true };
         }
         // неверно: показываем догадку рисующему; угадывающему — «почти», если близко
@@ -195,7 +226,6 @@ const drawGuess: GameDefinition = {
     const expiredWord = state.word;
     state.round += 1;
     state.drawerId = state.players.find((p) => p !== state.drawerId)!;
-    state.word = pickWord(expiredWord);
     return {
       events: [{ to: 'both', type: 'timeout', payload: { word: expiredWord } }],
       restart: true,
@@ -256,15 +286,15 @@ export class GameManager {
     }
     s.state = s.def.init(s.players, s.inviterId);
     s.status = 'active';
-    return this.startEvents(s);
+    return this.beginRound(s); // раунд начинается с выбора слова рисующим
   }
 
-  /** In-game событие (draw/guess/clear/skip). */
+  /** In-game событие (draw/guess/clear/skip/pick). */
   event(chatId: string, fromUserId: string, type: string, payload: any): OutEvent[] {
     const s = this.sessions.get(chatId);
     if (!s || s.status !== 'active' || !s.state) return [];
     if (!s.players.includes(fromUserId)) return [];
-    const { events, restart, winnerId } = s.def.onEvent(s.state, fromUserId, type, payload);
+    const { events, restart, startNow, winnerId } = s.def.onEvent(s.state, fromUserId, type, payload);
     const out: OutEvent[] = [];
     for (const e of events) {
       const targets = e.to === 'both' ? s.players : e.to === 'self' ? [fromUserId] : [s.players.find((p) => p !== fromUserId)!];
@@ -277,8 +307,35 @@ export class GameManager {
       this.clearSession(chatId);
       return out;
     }
-    if (restart) out.push(...this.startEvents(s));
+    if (startNow) out.push(...this.startEvents(s)); // слово выбрано → рисуем
+    else if (restart) out.push(...this.beginRound(s)); // новый раунд → снова выбор слова
     return out;
+  }
+
+  /** Начало раунда: рисующему предлагаются слова на выбор, угадывающий ждёт. */
+  private beginRound(s: Session): OutEvent[] {
+    const st = s.state!;
+    st.choosing = true;
+    st.candidates = s.def.pickCandidates(CHOICE_COUNT);
+    st.word = '';
+    this.armChoiceTimer(s);
+    return s.players.map((p) => {
+      const other = st.players.find((x) => x !== p)!;
+      const role: GameRole = p === st.drawerId ? 'drawer' : 'guesser';
+      return {
+        toUserId: p,
+        event: 'game:choose' as const,
+        data: {
+          role,
+          words: role === 'drawer' ? st.candidates : undefined,
+          chooseSeconds: CHOOSE_SECONDS,
+          round: st.round,
+          myScore: st.scores[p] || 0,
+          opponentScore: st.scores[other] || 0,
+          targetScore: TARGET_SCORE,
+        },
+      };
+    });
   }
 
   /** Выход/завершение игры. */
@@ -345,6 +402,25 @@ export class GameManager {
     s.timer.unref?.();
   }
 
+  /** Таймер фазы выбора слова: по истечении — авто-выбор первого кандидата. */
+  private armChoiceTimer(s: Session): void {
+    if (s.timer) clearTimeout(s.timer);
+    s.roundEndsAt = undefined; // раунд ещё не идёт
+    s.timer = setTimeout(() => this.onChoiceTimeout(s.chatId), CHOOSE_SECONDS * 1000);
+    s.timer.unref?.();
+  }
+
+  /** Рисующий не выбрал слово вовремя → берём первого кандидата и начинаем раунд. */
+  private onChoiceTimeout(chatId: string): void {
+    const s = this.sessions.get(chatId);
+    if (!s || s.status !== 'active' || !s.state || !s.state.choosing) return;
+    const st = s.state;
+    st.word = st.candidates[0] || pickWord();
+    st.choosing = false;
+    st.candidates = [];
+    this.dispatcher?.(this.startEvents(s));
+  }
+
   /**
    * События для переподключившегося игрока (ресинк без пере-арма таймера):
    * - активная партия → game:start-снапшот с ролью/счётом/остатком времени;
@@ -358,8 +434,27 @@ export class GameManager {
     }
     if (s.status !== 'active' || !s.state) return []; // pending — оставляем приглашение
     const st = s.state;
-    const info = s.def.startInfo(st, userId);
     const other = st.players.find((x) => x !== userId)!;
+
+    // Фаза выбора слова: пере-отдаём game:choose (рисующему — слова, угадывающему — ожидание).
+    if (st.choosing) {
+      const role: GameRole = userId === st.drawerId ? 'drawer' : 'guesser';
+      return [{
+        toUserId: userId,
+        event: 'game:choose',
+        data: {
+          role,
+          words: role === 'drawer' ? st.candidates : undefined,
+          chooseSeconds: CHOOSE_SECONDS,
+          round: st.round,
+          myScore: st.scores[userId] || 0,
+          opponentScore: st.scores[other] || 0,
+          targetScore: TARGET_SCORE,
+        },
+      }];
+    }
+
+    const info = s.def.startInfo(st, userId);
     const remainingMs = s.roundEndsAt ? Math.max(0, s.roundEndsAt - Date.now()) : this.roundMs;
     return [{
       toUserId: userId,
@@ -390,7 +485,7 @@ export class GameManager {
         out.push({ toUserId: t, event: 'game:event', data: { type: e.type, payload: e.payload } });
       }
     }
-    if (restart) out.push(...this.startEvents(s));
+    if (restart) out.push(...this.beginRound(s)); // новый раунд → выбор слова
     this.dispatcher?.(out);
   }
 
