@@ -284,3 +284,36 @@ describe('таймер раунда', () => {
     expect(dispatched).toHaveLength(0);
   });
 });
+
+describe('подсказки: маска и «почти»', () => {
+  it('угадывающий получает маску вместо слова; число точек = числу букв', () => {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    const out = gm.respond(CHAT, B, true);
+    const drawer = out.find((e) => e.event === 'game:start' && (e.data as any).word) as any;
+    const guesser = out.find((e) => e.event === 'game:start' && !(e.data as any).word) as any;
+    const word: string = drawer.data.word;
+    expect(guesser.data.word).toBeUndefined();
+    expect(typeof guesser.data.mask).toBe('string');
+    const dots = (guesser.data.mask.match(/•/g) || []).length;
+    expect(dots).toBe(word.replace(/ /g, '').length);
+  });
+
+  it('близкая догадка (расстояние 1) → «close» угадывающему + показ рисующему, очков нет', () => {
+    const { gm, word } = startGame();
+    const near = word.slice(0, -1); // удаляем последнюю букву → расстояние 1
+    const out = gm.event(CHAT, B, 'guess', { text: near });
+    expect(out.some((e) => e.toUserId === B && (e.data as any).type === 'close')).toBe(true);
+    expect(out.some((e) => e.toUserId === A && (e.data as any).type === 'guess')).toBe(true);
+    // игра продолжается, счёт не меняется
+    const cont = gm.event(CHAT, B, 'guess', { text: word });
+    expect(cont.some((e) => (e.data as any).type === 'correct')).toBe(true);
+  });
+
+  it('совсем не близкая догадка → без «close»', () => {
+    const { gm } = startGame();
+    const out = gm.event(CHAT, B, 'guess', { text: 'йцукенгшщз' });
+    expect(out.some((e) => (e.data as any).type === 'close')).toBe(false);
+    expect(out.some((e) => e.toUserId === A && (e.data as any).type === 'guess')).toBe(true);
+  });
+});

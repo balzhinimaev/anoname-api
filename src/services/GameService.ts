@@ -10,7 +10,7 @@
 
 export type OutEvent =
   | { toUserId: string; event: 'game:invite'; data: { gameId: string; by: string; title: string } }
-  | { toUserId: string; event: 'game:start'; data: { gameId: string; role: GameRole; word?: string; myScore: number; opponentScore: number; round: number; roundSeconds: number; targetScore: number } }
+  | { toUserId: string; event: 'game:start'; data: { gameId: string; role: GameRole; word?: string; mask?: string; myScore: number; opponentScore: number; round: number; roundSeconds: number; targetScore: number } }
   | { toUserId: string; event: 'game:event'; data: { type: string; payload?: any } }
   | { toUserId: string; event: 'game:end'; data: { reason?: string; youWon?: boolean; myScore?: number; opponentScore?: number } };
 
@@ -36,8 +36,8 @@ interface GameDefinition {
   title: string;
   /** Начальное состояние новой игры (starter ходит первым «рисующим»). */
   init(players: [string, string], starterId: string): GameState;
-  /** Роль игрока + приватные данные для game:start (рисующему — слово). */
-  startInfo(state: GameState, userId: string): { role: GameRole; word?: string };
+  /** Роль игрока + приватные данные для game:start (рисующему — слово, угадывающему — маску). */
+  startInfo(state: GameState, userId: string): { role: GameRole; word?: string; mask?: string };
   /** Обработка in-game события. restart=true → сервер заново разошлёт game:start обоим (новый раунд). */
   onEvent(
     state: GameState,
@@ -51,13 +51,26 @@ interface GameDefinition {
 
 // ── Банк слов для «Угадай рисунок» (простые, рисуемые) ──────────────────────────
 const WORD_BANK = [
-  'кот', 'собака', 'дом', 'дерево', 'солнце', 'машина', 'цветок', 'рыба', 'звезда', 'сердце',
-  'яблоко', 'банан', 'гриб', 'зонт', 'очки', 'часы', 'ключ', 'лодка', 'самолёт', 'ракета',
-  'гитара', 'барабан', 'мяч', 'воздушный шар', 'снеговик', 'ёлка', 'торт', 'мороженое', 'пицца', 'чашка',
-  'телефон', 'компьютер', 'книга', 'карандаш', 'ножницы', 'молоток', 'лампочка', 'свеча', 'замок', 'мост',
-  'гора', 'река', 'облако', 'радуга', 'молния', 'снежинка', 'лист', 'бабочка', 'пчела', 'паук',
-  'слон', 'жираф', 'лев', 'медведь', 'заяц', 'лиса', 'птица', 'улитка', 'черепаха', 'краб',
-  'корона', 'робот', 'призрак', 'клоун', 'футболка', 'ботинок', 'шляпа', 'перчатка', 'флаг', 'якорь',
+  // животные
+  'кот', 'собака', 'рыба', 'слон', 'жираф', 'лев', 'медведь', 'заяц', 'лиса', 'птица',
+  'улитка', 'черепаха', 'краб', 'бабочка', 'пчела', 'паук', 'змея', 'лягушка', 'ёжик', 'белка',
+  'сова', 'пингвин', 'кит', 'акула', 'осьминог', 'дельфин', 'петух', 'корова', 'свинья', 'овца',
+  'лошадь', 'мышь', 'волк', 'тигр', 'обезьяна', 'кенгуру', 'верблюд', 'улей', 'муравей', 'динозавр',
+  // природа
+  'дерево', 'солнце', 'цветок', 'звезда', 'гора', 'река', 'облако', 'радуга', 'молния', 'снежинка',
+  'лист', 'гриб', 'кактус', 'вулкан', 'остров', 'водопад', 'костёр', 'луна', 'планета', 'море',
+  // еда
+  'яблоко', 'банан', 'торт', 'мороженое', 'пицца', 'арбуз', 'клубника', 'вишня', 'лимон', 'апельсин',
+  'морковь', 'перец', 'яйцо', 'сыр', 'хлеб', 'конфета', 'пончик', 'бургер', 'сосиска', 'чашка',
+  // предметы
+  'дом', 'машина', 'зонт', 'очки', 'часы', 'ключ', 'лодка', 'самолёт', 'ракета', 'гитара',
+  'барабан', 'мяч', 'воздушный шар', 'снеговик', 'ёлка', 'телефон', 'компьютер', 'книга', 'карандаш', 'ножницы',
+  'молоток', 'лампочка', 'свеча', 'замок', 'мост', 'корона', 'робот', 'призрак', 'клоун', 'футболка',
+  'ботинок', 'шляпа', 'перчатка', 'флаг', 'якорь', 'ведро', 'лестница', 'зеркало', 'кровать', 'стул',
+  'диван', 'дверь', 'окно', 'чемодан', 'фотоаппарат', 'наушники', 'кисть', 'иголка', 'подушка', 'фонарик',
+  'поезд', 'велосипед', 'вертолёт', 'трактор', 'светофор', 'парашют', 'сани', 'скейт', 'коляска', 'колесо',
+  // фигуры/символы/прочее
+  'сердце', 'домик', 'снежинка', 'подарок', 'воздушный змей', 'мельница', 'маяк', 'палатка', 'замок песочный', 'меч',
 ];
 
 /** Нормализация для сравнения догадки со словом. */
@@ -74,6 +87,32 @@ function pickWord(exclude?: string): string {
     }
   }
   return w;
+}
+
+/** Маска слова для угадывающего: длина по буквам, пробелы сохраняются. «дом» → «• • •». */
+function maskOf(word: string): string {
+  return String(word || '')
+    .split('')
+    .map((ch) => (ch === ' ' ? '  ' : '•'))
+    .join(' ')
+    .trim();
+}
+
+/** Расстояние Левенштейна — для распознавания «почти угадал» (опечатка/окончание). */
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    prev = cur;
+  }
+  return prev[b.length];
 }
 
 // ── Игра «Угадай рисунок» ───────────────────────────────────────────────────────
@@ -94,7 +133,9 @@ const drawGuess: GameDefinition = {
 
   startInfo(state, userId) {
     const role: GameRole = userId === state.drawerId ? 'drawer' : 'guesser';
-    return { role, word: role === 'drawer' ? state.word : undefined };
+    return role === 'drawer'
+      ? { role, word: state.word }
+      : { role, mask: maskOf(state.word) };
   },
 
   onEvent(state, fromUserId, type, payload) {
@@ -133,8 +174,15 @@ const drawGuess: GameDefinition = {
           state.word = pickWord(guessedWord);
           return { events: [correctEvent], restart: true };
         }
-        // неверно: показываем догадку рисующему
-        return { events: [{ to: 'other', type: 'guess', payload: { text: String(payload?.text || '').slice(0, 60) } }] };
+        // неверно: показываем догадку рисующему; угадывающему — «почти», если близко
+        const target = normalize(state.word);
+        const dist = levenshtein(guess, target);
+        const isClose = dist > 0 && (dist === 1 || (dist === 2 && target.length >= 6));
+        const events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }> = [
+          { to: 'other', type: 'guess', payload: { text: String(payload?.text || '').slice(0, 60) } },
+        ];
+        if (isClose) events.push({ to: 'self', type: 'close' });
+        return { events };
       }
 
       default:
@@ -260,6 +308,7 @@ export class GameManager {
           gameId: st.gameId,
           role: info.role,
           word: info.word,
+          mask: info.mask,
           myScore: st.scores[p] || 0,
           opponentScore: st.scores[other] || 0,
           round: st.round,
@@ -319,6 +368,7 @@ export class GameManager {
         gameId: st.gameId,
         role: info.role,
         word: info.word,
+        mask: info.mask,
         myScore: st.scores[userId] || 0,
         opponentScore: st.scores[other] || 0,
         round: st.round,
