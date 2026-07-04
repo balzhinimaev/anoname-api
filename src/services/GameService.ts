@@ -167,6 +167,7 @@ interface Session {
   status: 'pending' | 'active';
   chatId: string;
   timer?: NodeJS.Timeout; // таймер текущего раунда
+  roundEndsAt?: number; // ms epoch окончания текущего раунда (для ресинка при reconnect)
 }
 
 export class GameManager {
@@ -290,8 +291,41 @@ export class GameManager {
   /** (Пере)запуск таймера раунда активной сессии. */
   private armTimer(s: Session): void {
     if (s.timer) clearTimeout(s.timer);
+    s.roundEndsAt = Date.now() + this.roundMs;
     s.timer = setTimeout(() => this.onRoundTimeout(s.chatId), this.roundMs);
     s.timer.unref?.();
+  }
+
+  /**
+   * События для переподключившегося игрока (ресинк без пере-арма таймера):
+   * - активная партия → game:start-снапшот с ролью/счётом/остатком времени;
+   * - нет партии (завершилась, пока клиент был офлайн) → game:end, чтобы закрыть
+   *   «зависший» оверлей; ожидающее приглашение (pending) не трогаем.
+   */
+  syncEvents(chatId: string, userId: string): OutEvent[] {
+    const s = this.sessions.get(chatId);
+    if (!s || !s.players.includes(userId)) {
+      return [{ toUserId: userId, event: 'game:end', data: { reason: 'ended' } }];
+    }
+    if (s.status !== 'active' || !s.state) return []; // pending — оставляем приглашение
+    const st = s.state;
+    const info = s.def.startInfo(st, userId);
+    const other = st.players.find((x) => x !== userId)!;
+    const remainingMs = s.roundEndsAt ? Math.max(0, s.roundEndsAt - Date.now()) : this.roundMs;
+    return [{
+      toUserId: userId,
+      event: 'game:start',
+      data: {
+        gameId: st.gameId,
+        role: info.role,
+        word: info.word,
+        myScore: st.scores[userId] || 0,
+        opponentScore: st.scores[other] || 0,
+        round: st.round,
+        roundSeconds: Math.max(1, Math.round(remainingMs / 1000)),
+        targetScore: TARGET_SCORE,
+      },
+    }];
   }
 
   /** Истечение таймера раунда: события игры + новый раунд через диспетчер. */

@@ -219,6 +219,15 @@ export class WebSocketManager {
         partnerStatus: partnerStatusPayload,
         matchedUser
       });
+
+      // Ресинк мини-игры для переподключившегося: активная партия → снапшот
+      // game:start (роль/счёт/остаток таймера, без пере-арма); завершившаяся —
+      // game:end закрывает «зависший» оверлей. Иначе холст/таймер/фаза терялись.
+      try {
+        this.dispatchGameEvents(gameManager.syncEvents(chatId, userId));
+      } catch (e) {
+        wsLogger.error('game_sync_on_connect', userId, e as Error);
+      }
     } catch (error) {
       wsLogger.error('emit_session_state', userId, error as Error);
     }
