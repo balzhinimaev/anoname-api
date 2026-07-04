@@ -132,9 +132,9 @@ export interface ServerToClientEvents {
 
   // Мини-игры (generic игровой слой)
   'game:invite': (data: { gameId: string; by: string; title: string }) => void;
-  'game:start': (data: { gameId: string; role: 'drawer' | 'guesser'; word?: string; myScore: number; opponentScore: number; round: number }) => void;
+  'game:start': (data: { gameId: string; role: 'drawer' | 'guesser'; word?: string; myScore: number; opponentScore: number; round: number; roundSeconds: number; targetScore: number }) => void;
   'game:event': (data: { type: string; payload?: any }) => void;
-  'game:end': (data: { reason?: string }) => void;
+  'game:end': (data: { reason?: string; youWon?: boolean; myScore?: number; opponentScore?: number }) => void;
 }
 
 export interface ClientToServerEvents {

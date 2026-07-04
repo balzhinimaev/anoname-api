@@ -10,9 +10,14 @@
 
 export type OutEvent =
   | { toUserId: string; event: 'game:invite'; data: { gameId: string; by: string; title: string } }
-  | { toUserId: string; event: 'game:start'; data: { gameId: string; role: GameRole; word?: string; myScore: number; opponentScore: number; round: number } }
+  | { toUserId: string; event: 'game:start'; data: { gameId: string; role: GameRole; word?: string; myScore: number; opponentScore: number; round: number; roundSeconds: number; targetScore: number } }
   | { toUserId: string; event: 'game:event'; data: { type: string; payload?: any } }
-  | { toUserId: string; event: 'game:end'; data: { reason?: string } };
+  | { toUserId: string; event: 'game:end'; data: { reason?: string; youWon?: boolean; myScore?: number; opponentScore?: number } };
+
+/** Длительность раунда: не успел угадать — слово раскрывается, роли меняются. */
+export const ROUND_SECONDS = 90;
+/** Игра идёт до этого количества очков. */
+export const TARGET_SCORE = 5;
 
 export type GameRole = 'drawer' | 'guesser';
 
@@ -39,7 +44,9 @@ interface GameDefinition {
     fromUserId: string,
     type: string,
     payload: any
-  ): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean };
+  ): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean; winnerId?: string };
+  /** Истёк таймер раунда. Вернуть события и (обычно) restart для нового раунда. */
+  onTimeout(state: GameState): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean };
 }
 
 // ── Банк слов для «Угадай рисунок» (простые, рисуемые) ──────────────────────────
@@ -112,16 +119,19 @@ const drawGuess: GameDefinition = {
         const guess = normalize(String(payload?.text || ''));
         if (!guess) return { events: [] };
         if (guess === normalize(state.word)) {
-          // верно: очко угадавшему, меняем рисующего, новое слово, новый раунд
+          // верно: очко угадавшему
           state.scores[fromUserId] = (state.scores[fromUserId] || 0) + 1;
-          state.round += 1;
           const guessedWord = state.word;
+          const correctEvent = { to: 'both' as const, type: 'correct', payload: { by: fromUserId, word: guessedWord, scores: state.scores } };
+          if ((state.scores[fromUserId] || 0) >= TARGET_SCORE) {
+            // набрал целевой счёт — игра окончена
+            return { events: [correctEvent], winnerId: fromUserId };
+          }
+          // меняем рисующего, новое слово, новый раунд
+          state.round += 1;
           state.drawerId = fromUserId; // угадавший становится рисующим (роли меняются)
           state.word = pickWord(guessedWord);
-          return {
-            events: [{ to: 'both', type: 'correct', payload: { by: fromUserId, word: guessedWord, scores: state.scores } }],
-            restart: true,
-          };
+          return { events: [correctEvent], restart: true };
         }
         // неверно: показываем догадку рисующему
         return { events: [{ to: 'other', type: 'guess', payload: { text: String(payload?.text || '').slice(0, 60) } }] };
@@ -130,6 +140,18 @@ const drawGuess: GameDefinition = {
       default:
         return { events: [] };
     }
+  },
+
+  onTimeout(state) {
+    // время вышло: раскрываем слово, очков никому, роли меняются, новый раунд
+    const expiredWord = state.word;
+    state.round += 1;
+    state.drawerId = state.players.find((p) => p !== state.drawerId)!;
+    state.word = pickWord(expiredWord);
+    return {
+      events: [{ to: 'both', type: 'timeout', payload: { word: expiredWord } }],
+      restart: true,
+    };
   },
 };
 
@@ -143,10 +165,20 @@ interface Session {
   players: [string, string];
   inviterId: string;
   status: 'pending' | 'active';
+  chatId: string;
+  timer?: NodeJS.Timeout; // таймер текущего раунда
 }
 
 export class GameManager {
   private sessions = new Map<string, Session>(); // chatId -> session
+  /** Рассылка событий вне запроса (истечение таймера раунда). Регистрирует WebSocketManager. */
+  private dispatcher: ((events: OutEvent[]) => void) | null = null;
+
+  constructor(private roundMs: number = ROUND_SECONDS * 1000) {}
+
+  setDispatcher(fn: (events: OutEvent[]) => void): void {
+    this.dispatcher = fn;
+  }
 
   /** Доступные игры (для меню). */
   static catalog(): Array<{ id: string; title: string }> {
@@ -161,7 +193,7 @@ export class GameManager {
     if (!other) return [];
     // Не перетираем уже идущую игру повторным приглашением.
     if (this.sessions.get(chatId)?.status === 'active') return [];
-    this.sessions.set(chatId, { def, players, inviterId: fromUserId, status: 'pending' });
+    this.sessions.set(chatId, { def, players, inviterId: fromUserId, status: 'pending', chatId });
     return [{ toUserId: other, event: 'game:invite', data: { gameId: def.id, by: fromUserId, title: def.title } }];
   }
 
@@ -170,7 +202,7 @@ export class GameManager {
     const s = this.sessions.get(chatId);
     if (!s || s.status !== 'pending' || userId === s.inviterId) return [];
     if (!accept) {
-      this.sessions.delete(chatId);
+      this.clearSession(chatId);
       return s.players.map((p) => ({ toUserId: p, event: 'game:end' as const, data: { reason: 'declined' } }));
     }
     s.state = s.def.init(s.players, s.inviterId);
@@ -183,13 +215,18 @@ export class GameManager {
     const s = this.sessions.get(chatId);
     if (!s || s.status !== 'active' || !s.state) return [];
     if (!s.players.includes(fromUserId)) return [];
-    const { events, restart } = s.def.onEvent(s.state, fromUserId, type, payload);
+    const { events, restart, winnerId } = s.def.onEvent(s.state, fromUserId, type, payload);
     const out: OutEvent[] = [];
     for (const e of events) {
       const targets = e.to === 'both' ? s.players : e.to === 'self' ? [fromUserId] : [s.players.find((p) => p !== fromUserId)!];
       for (const t of targets) {
         out.push({ toUserId: t, event: 'game:event', data: { type: e.type, payload: e.payload } });
       }
+    }
+    if (winnerId) {
+      out.push(...this.finishEvents(s, winnerId));
+      this.clearSession(chatId);
+      return out;
     }
     if (restart) out.push(...this.startEvents(s));
     return out;
@@ -199,7 +236,7 @@ export class GameManager {
   leave(chatId: string, _userId: string): OutEvent[] {
     const s = this.sessions.get(chatId);
     if (!s) return [];
-    this.sessions.delete(chatId);
+    this.clearSession(chatId);
     return s.players.map((p) => ({ toUserId: p, event: 'game:end' as const, data: { reason: 'ended' } }));
   }
 
@@ -208,18 +245,76 @@ export class GameManager {
     return this.leave(chatId, '');
   }
 
-  /** game:start обоим игрокам (роль-специфично). */
+  /** game:start обоим игрокам (роль-специфично) + перезапуск таймера раунда. */
   private startEvents(s: Session): OutEvent[] {
     const st = s.state!;
+    this.armTimer(s);
     return s.players.map((p) => {
       const info = s.def.startInfo(st, p);
       const other = st.players.find((x) => x !== p)!;
       return {
         toUserId: p,
         event: 'game:start' as const,
-        data: { gameId: st.gameId, role: info.role, word: info.word, myScore: st.scores[p] || 0, opponentScore: st.scores[other] || 0, round: st.round },
+        data: {
+          gameId: st.gameId,
+          role: info.role,
+          word: info.word,
+          myScore: st.scores[p] || 0,
+          opponentScore: st.scores[other] || 0,
+          round: st.round,
+          roundSeconds: Math.round(this.roundMs / 1000),
+          targetScore: TARGET_SCORE,
+        },
       };
     });
+  }
+
+  /** Персонализированный game:end по итогам игры (победа/поражение + счёт). */
+  private finishEvents(s: Session, winnerId: string): OutEvent[] {
+    const st = s.state!;
+    return s.players.map((p) => {
+      const other = s.players.find((x) => x !== p)!;
+      return {
+        toUserId: p,
+        event: 'game:end' as const,
+        data: {
+          reason: 'finished',
+          youWon: p === winnerId,
+          myScore: st.scores[p] || 0,
+          opponentScore: st.scores[other] || 0,
+        },
+      };
+    });
+  }
+
+  /** (Пере)запуск таймера раунда активной сессии. */
+  private armTimer(s: Session): void {
+    if (s.timer) clearTimeout(s.timer);
+    s.timer = setTimeout(() => this.onRoundTimeout(s.chatId), this.roundMs);
+    s.timer.unref?.();
+  }
+
+  /** Истечение таймера раунда: события игры + новый раунд через диспетчер. */
+  private onRoundTimeout(chatId: string): void {
+    const s = this.sessions.get(chatId);
+    if (!s || s.status !== 'active' || !s.state) return;
+    const { events, restart } = s.def.onTimeout(s.state);
+    const out: OutEvent[] = [];
+    for (const e of events) {
+      // без инициатора события адресуем обоим игрокам
+      for (const t of s.players) {
+        out.push({ toUserId: t, event: 'game:event', data: { type: e.type, payload: e.payload } });
+      }
+    }
+    if (restart) out.push(...this.startEvents(s));
+    this.dispatcher?.(out);
+  }
+
+  /** Удаление сессии с остановкой таймера. */
+  private clearSession(chatId: string): void {
+    const s = this.sessions.get(chatId);
+    if (s?.timer) clearTimeout(s.timer);
+    this.sessions.delete(chatId);
   }
 }
 

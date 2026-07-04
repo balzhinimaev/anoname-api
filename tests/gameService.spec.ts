@@ -1,5 +1,5 @@
-import { describe, expect, it } from '@jest/globals';
-import { GameManager } from '../src/services/GameService';
+import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
+import { GameManager, OutEvent, TARGET_SCORE, ROUND_SECONDS } from '../src/services/GameService';
 
 const CHAT = 'c1';
 const A = 'userA';
@@ -170,5 +170,117 @@ describe('авторизация участников', () => {
     expect(gm.invite(CHAT, A, 'draw-guess', PLAYERS)).toEqual([]);
     // игра всё ещё активна — событие рисующего обрабатывается
     expect(gm.event(CHAT, A, 'draw', { x0: 0, y0: 0, x1: 1, y1: 1 })).toHaveLength(1);
+  });
+});
+
+describe('конец игры (победа до TARGET_SCORE)', () => {
+  /** Играет верными догадками до конца игры (очки чередуются из-за смены ролей). */
+  function playToWin(gm: GameManager, firstWord: string): OutEvent[] {
+    let word = firstWord;
+    let guesser = B; // A стартует рисующим
+    let out: OutEvent[] = [];
+    for (let i = 0; i < TARGET_SCORE * 2; i++) {
+      out = gm.event(CHAT, guesser, 'guess', { text: word });
+      if (out.some((e) => e.event === 'game:end')) return out;
+      const drawerStart = out.find((e) => e.event === 'game:start' && (e.data as any).word) as any;
+      word = drawerStart.data.word;
+      guesser = drawerStart.toUserId === A ? B : A;
+    }
+    throw new Error('игра не завершилась за ожидаемое число раундов');
+  }
+
+  it('game:start содержит roundSeconds и targetScore', () => {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    const out = gm.respond(CHAT, B, true);
+    const start = out.find((e) => e.event === 'game:start')!.data as any;
+    expect(start.roundSeconds).toBe(ROUND_SECONDS);
+    expect(start.targetScore).toBe(TARGET_SCORE);
+  });
+
+  it('набор TARGET_SCORE очков → correct + персонализированный game:end, сессия закрыта', () => {
+    const { gm, word } = startGame();
+    const out = playToWin(gm, word);
+
+    // последний ответ: correct обоим + game:end обоим, БЕЗ нового game:start
+    expect(out.some((e) => (e.data as any).type === 'correct')).toBe(true);
+    expect(out.some((e) => e.event === 'game:start')).toBe(false);
+    const ends = out.filter((e) => e.event === 'game:end');
+    expect(ends).toHaveLength(2);
+    const winnerEnd = ends.find((e) => (e.data as any).youWon)!.data as any;
+    const loserEnd = ends.find((e) => !(e.data as any).youWon)!.data as any;
+    expect(winnerEnd.reason).toBe('finished');
+    expect(winnerEnd.myScore).toBe(TARGET_SCORE);
+    expect(loserEnd.opponentScore).toBe(TARGET_SCORE);
+
+    // сессия удалена — события игнорируются, можно пригласить заново
+    expect(gm.event(CHAT, A, 'draw', {})).toEqual([]);
+    expect(gm.invite(CHAT, A, 'draw-guess', PLAYERS)).toHaveLength(1);
+  });
+});
+
+describe('таймер раунда', () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  function startTimedGame(roundMs = 5000) {
+    const gm = new GameManager(roundMs);
+    const dispatched: OutEvent[][] = [];
+    gm.setDispatcher((evts) => dispatched.push(evts));
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    const out = gm.respond(CHAT, B, true);
+    const word = (out.find((e) => e.toUserId === A && e.event === 'game:start')!.data as any).word as string;
+    return { gm, dispatched, word };
+  }
+
+  it('по истечении раунда: timeout со словом обоим + новый раунд со сменой ролей, очков никому', () => {
+    const { gm, dispatched, word } = startTimedGame();
+    void gm;
+    jest.advanceTimersByTime(5000);
+
+    expect(dispatched).toHaveLength(1);
+    const out = dispatched[0];
+    const timeouts = out.filter((e) => (e.data as any).type === 'timeout');
+    expect(timeouts.map((e) => e.toUserId).sort()).toEqual([A, B]);
+    expect((timeouts[0].data as any).payload.word).toBe(word);
+
+    const starts = out.filter((e) => e.event === 'game:start');
+    expect(starts).toHaveLength(2);
+    const bStart = starts.find((e) => e.toUserId === B)!.data as any;
+    expect(bStart.role).toBe('drawer'); // роли поменялись
+    expect(bStart.myScore).toBe(0);
+    expect(bStart.round).toBe(2);
+  });
+
+  it('верная догадка перезапускает таймер (старый не срабатывает)', () => {
+    const { gm, dispatched, word } = startTimedGame();
+    jest.advanceTimersByTime(4000);
+    gm.event(CHAT, B, 'guess', { text: word }); // раунд закончился догадкой
+    jest.advanceTimersByTime(1500); // старый дедлайн прошёл, новый (5s) ещё нет
+    expect(dispatched).toHaveLength(0);
+    jest.advanceTimersByTime(3500); // истёк уже новый раунд
+    expect(dispatched).toHaveLength(1);
+  });
+
+  it('после leave таймер не срабатывает', () => {
+    const { gm, dispatched } = startTimedGame();
+    gm.leave(CHAT, A);
+    jest.advanceTimersByTime(60000);
+    expect(dispatched).toHaveLength(0);
+  });
+
+  it('после победы таймер не срабатывает', () => {
+    const { gm, dispatched, word } = startTimedGame();
+    let w = word;
+    let guesser = B;
+    for (let i = 0; i < TARGET_SCORE * 2; i++) {
+      const out = gm.event(CHAT, guesser, 'guess', { text: w });
+      if (out.some((e) => e.event === 'game:end')) break;
+      const drawerStart = out.find((e) => e.event === 'game:start' && (e.data as any).word) as any;
+      w = drawerStart.data.word;
+      guesser = drawerStart.toUserId === A ? B : A;
+    }
+    jest.advanceTimersByTime(60000);
+    expect(dispatched).toHaveLength(0);
   });
 });

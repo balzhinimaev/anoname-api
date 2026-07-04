@@ -103,6 +103,8 @@ export class WebSocketManager {
     this.io.use(socketAuth);
     this.initializeEventHandlers();
     this.startZombieSweep();
+    // Асинхронные игровые события (истечение таймера раунда) — тем же адресным каналом.
+    gameManager.setDispatcher((events) => this.dispatchGameEvents(events));
   }
 
   /**
