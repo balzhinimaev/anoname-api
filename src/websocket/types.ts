@@ -20,6 +20,8 @@ export interface ServerToClientEvents {
       photos?: string[];
       isPremium: boolean;
       chatId: string;
+      // Грубое расстояние (км, ступенчатое округление) — только если оба делились гео
+      distanceKm?: number;
     };
   }) => void;
   'search:expired': () => void;
@@ -30,6 +32,7 @@ export interface ServerToClientEvents {
     t: number;  // total searching
     m: number;  // male searching
     f: number;  // female searching
+    inChat: number;  // людей в активных чатах (чаты × 2)
     online: {
       t: number;  // total online
       m: number;  // male online
@@ -106,6 +109,7 @@ export interface ServerToClientEvents {
       photos?: string[];
       isPremium?: boolean;
       chatId: string;
+      distanceKm?: number;
     }
   }) => void;
 
@@ -168,6 +172,8 @@ export interface ClientToServerEvents {
   }) => void;
   'chat:start_typing': (data: { chatId: string }) => void;
   'chat:stop_typing': (data: { chatId: string }) => void;
+  // Запросить у AI тему/вопрос для оживления диалога (айсбрейкер)
+  'chat:suggest_topic': (data: { chatId: string }) => void;
   'chat:read': (data: {
     chatId: string;
     timestamp: Date;

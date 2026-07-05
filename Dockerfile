@@ -29,6 +29,9 @@ WORKDIR /app
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
+# ffmpeg — транскод/анонимизация голосовых сообщений (VoiceService)
+RUN apk add --no-cache ffmpeg
+
 # Копируем package.json для определения зависимостей
 COPY package*.json ./
 
@@ -38,8 +41,8 @@ RUN npm ci --only=production && npm cache clean --force
 # Копируем скомпилированный код из стадии builder
 COPY --from=builder /app/dist ./dist
 
-# Создаем директорию для логов и устанавливаем права
-RUN mkdir -p logs && chown -R nodejs:nodejs /app
+# Создаем директории для логов и медиа (голосовые) и устанавливаем права
+RUN mkdir -p logs /data/media && chown -R nodejs:nodejs /app /data/media
 USER nodejs
 
 # Экспонируем порт

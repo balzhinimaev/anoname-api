@@ -125,6 +125,25 @@ export default {
     maxAttempts: Math.max(1, parsePositiveInt(process.env.LEAD_BROADCAST_MAX_ATTEMPTS, 3)),
     maxDeferrals: Math.max(1, parsePositiveInt(process.env.LEAD_BROADCAST_MAX_DEFERRALS, 10)),
   },
+  // Голосовые сообщения
+  voice: {
+    // Каталог хранения (в docker — volume media-data)
+    mediaDir: process.env.MEDIA_DIR || '/data/media',
+    maxUploadBytes: parsePositiveInt(process.env.VOICE_MAX_UPLOAD_BYTES, 2 * 1024 * 1024),
+    maxDurationSec: parsePositiveInt(process.env.VOICE_MAX_DURATION_SEC, 60),
+    // Минимальный интервал между голосовыми от одного юзера
+    minIntervalMs: parsePositiveInt(process.env.VOICE_MIN_INTERVAL_MS, 5_000),
+    maxPerChat: parsePositiveInt(process.env.VOICE_MAX_PER_CHAT, 30),
+  },
+  // OpenAI — генерация айсбрейкеров (тем/вопросов) для оживления анонимного диалога
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY || '',
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    // Пауза тишины (никто не печатает и не пишет), после которой шлём авто-подсказку
+    icebreakerIdleMs: parsePositiveInt(process.env.ICEBREAKER_IDLE_MS, 20_000),
+    // Кулдаун ручного запроса темы на чат
+    icebreakerManualCooldownMs: parsePositiveInt(process.env.ICEBREAKER_MANUAL_COOLDOWN_MS, 15_000),
+  },
   yookassa: {
     mode: process.env.YOOKASSA_MODE || 'test',
     shopIdTest: process.env.YOOKASSA_SHOP_ID_TEST || '',

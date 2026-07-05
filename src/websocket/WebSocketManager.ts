@@ -17,6 +17,7 @@ import Report from '../models/Report';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { BlockService } from '../services/BlockService';
 import { gameManager, OutEvent } from '../services/GameService';
+import { IcebreakerService } from '../services/IcebreakerService';
 
 // Создаем статическую карту для хранения таймаутов
 const pendingSearchCancellations = new Map<string, NodeJS.Timeout>();
@@ -47,6 +48,16 @@ export class WebSocketManager {
   // подряд — это переживает окно переподключения после рестарта.
   private zombieSuspects = new Set<string>();
   private readonly ZOMBIE_SWEEP_MS = 60_000;
+  // Айсбрейкеры: состояние «тишины» по чатам. eligible = с момента последней
+  // подсказки было хотя бы одно живое сообщение (защита от спама каждые 20с).
+  private icebreakerState: Map<string, {
+    timer?: NodeJS.Timeout;
+    typing: Set<string>;
+    eligible: boolean;
+    lastManualAt: number;
+  }> = new Map();
+  // Чаты, для которых стартовый айсбрейкер уже отправлен/запущен
+  private icebreakerStartSent = new Set<string>();
 
   constructor(httpServer: HttpServer) {
     const socketCorsOrigin = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
@@ -206,7 +217,11 @@ export class WebSocketManager {
               profilePhoto: other.profilePhoto,
               photos: other.photos,
               isPremium: !!(other.subscription?.isActive && other.subscription?.type && other.subscription?.type !== 'basic'),
-              chatId
+              chatId,
+              // Грубое расстояние из чата — бейдж «📍 ~N км» переживает реконнект
+              ...(typeof (activeChat as { distanceKm?: number }).distanceKm === 'number'
+                ? { distanceKm: (activeChat as { distanceKm?: number }).distanceKm }
+                : {})
             };
           }
         } catch (e) {
@@ -293,27 +308,12 @@ export class WebSocketManager {
       // Подписка на статистику поиска
       socket.on('search:subscribe_stats', async () => {
         socket.join('search_stats_room');
-        
-        // Отправляем текущую статистику сразу после подписки
+
+        // Отправляем текущую статистику сразу после подписки.
+        // Никаких «коррекций себя»: подписчик уже учтён в счётчиках БД,
+        // а мутация возвращённого объекта раньше отравляла общий кэш.
         try {
-          // Получаем текущую статистику
           const stats = await SearchService.getSearchStats();
-          
-          // Проверяем, находится ли пользователь в активном поиске
-          const userSearch = await SearchService.getUserActiveSearch(userId);
-          
-          // Если пользователь уже в поиске, но не включен в статистику - учитываем его
-          if (userSearch && userSearch.status === 'searching') {
-            const userGender = userSearch.gender || 'unknown';
-            if (userGender === 'male') {
-              stats.m += 1;
-              stats.t += 1;
-            } else if (userGender === 'female') {
-              stats.f += 1;
-              stats.t += 1;
-            }
-          }
-          
           socket.emit('search:stats', stats);
         } catch (error) {
           wsLogger.error('stats_initial', userId, error as Error);
@@ -445,6 +445,10 @@ export class WebSocketManager {
               this.disarmChatEndTimer(chatId);
               this.sendToUser(otherParticipant, 'chat:partner_status', { chatId, userId, status: 'online' });
               wsLogger.info('chat_end_timer_cleared_on_join', `Both online for chat ${chatId} after join by ${userId}`, { userId, chatId });
+              // Свежий матч: оба в комнате и сообщений ещё нет → стартовый айсбрейкер
+              this.maybeSendStartIcebreaker(chatId, [userId, otherParticipant]).catch((e) =>
+                wsLogger.error('icebreaker_start_on_join', userId, e as Error, { chatId })
+              );
             } else {
               // Партнёр оффлайн → НЕ снимаем его grace, держим/обновляем таймер на обоих.
               this.armChatEndTimer(chatId, [userId, otherParticipant]);
@@ -509,6 +513,16 @@ export class WebSocketManager {
         if (!ok) return;
         wsLogger.event('chat_stop_typing', userId, socket.id, { chatId: data.chatId });
         this.handleChatStopTyping(socket, data.chatId);
+      });
+
+      // Ручной запрос темы/вопроса для оживления диалога
+      socket.on('chat:suggest_topic', (data) => {
+        if (!this.wsRateAllow(userId)) { metricsCollector.wsRateLimited('chat:suggest_topic'); return; }
+        const ok = typeof data?.chatId === 'string' && /^[a-f\d]{24}$/i.test(data.chatId);
+        if (!ok) return;
+        this.handleSuggestTopic(socket, data.chatId).catch((error) => {
+          wsLogger.error(userId, socket.id, error as Error, { event: 'chat_suggest_topic', chatId: data.chatId });
+        });
       });
 
       socket.on('chat:read', (data) => {
@@ -924,6 +938,14 @@ export class WebSocketManager {
   }
 
   private async handleFullDisconnect(userId: string, reason: string, duration: number) {
+    // Пользователь ушёл не попрощавшись (без chat:stop_typing) — снимаем его
+    // из typing-наборов, иначе idle-айсбрейкеры чата заглохнут навсегда
+    for (const [icChatId, st] of this.icebreakerState) {
+      if (st.typing.delete(userId) && st.typing.size === 0) {
+        this.armIcebreakerIdleTimer(icChatId);
+      }
+    }
+
     // Логика отмены поиска
     SearchService.getUserActiveSearch(userId).then(activeSearch => {
       if (activeSearch && activeSearch.status === 'searching') {
@@ -1026,6 +1048,143 @@ export class WebSocketManager {
     }
   }
 
+  // ===== Айсбрейкеры (оживление диалога) =====
+
+  private getIcebreakerState(chatId: string) {
+    let st = this.icebreakerState.get(chatId);
+    if (!st) {
+      st = { typing: new Set<string>(), eligible: false, lastManualAt: 0 };
+      this.icebreakerState.set(chatId, st);
+    }
+    return st;
+  }
+
+  // Участники чата, реально находящиеся в комнате (открыт экран чата)
+  private participantUserIdsInRoom(chatId: string): Set<string> {
+    const result = new Set<string>();
+    const room = this.io.sockets.adapter.rooms.get(`chat:${chatId}`);
+    if (!room) return result;
+    for (const socketId of room) {
+      const s = this.io.sockets.sockets.get(socketId);
+      const uid = s?.data?.user?._id?.toString();
+      if (uid) result.add(uid);
+    }
+    return result;
+  }
+
+  /**
+   * Вызывается из ChatService после каждого живого сообщения: сообщение
+   * делает чат «eligible» для авто-подсказки и перезапускает таймер тишины.
+   */
+  public noteChatMessage(chatId: string, userId: string): void {
+    const st = this.getIcebreakerState(chatId);
+    st.typing.delete(userId);
+    st.eligible = true;
+    this.armIcebreakerIdleTimer(chatId);
+  }
+
+  private noteTypingStart(chatId: string, userId: string): void {
+    const st = this.icebreakerState.get(chatId);
+    if (!st) return;
+    st.typing.add(userId);
+    if (st.timer) {
+      clearTimeout(st.timer);
+      st.timer = undefined;
+    }
+  }
+
+  private noteTypingStop(chatId: string, userId: string): void {
+    const st = this.icebreakerState.get(chatId);
+    if (!st) return;
+    st.typing.delete(userId);
+    if (st.typing.size === 0) {
+      this.armIcebreakerIdleTimer(chatId);
+    }
+  }
+
+  private armIcebreakerIdleTimer(chatId: string): void {
+    const st = this.getIcebreakerState(chatId);
+    if (st.timer) {
+      clearTimeout(st.timer);
+      st.timer = undefined;
+    }
+    if (!st.eligible || st.typing.size > 0) return;
+    st.timer = setTimeout(() => {
+      st.timer = undefined;
+      this.fireIdleIcebreaker(chatId).catch((e) =>
+        wsLogger.error('icebreaker_idle_fire', 'system', e as Error, { chatId })
+      );
+    }, config.openai.icebreakerIdleMs);
+  }
+
+  private async fireIdleIcebreaker(chatId: string): Promise<void> {
+    const st = this.icebreakerState.get(chatId);
+    if (!st || !st.eligible || st.typing.size > 0) return;
+    // Подсказка имеет смысл, только когда оба собеседника в чате
+    const chat = await Chat.findById(chatId).select('participants isActive');
+    if (!chat || !chat.isActive) return;
+    const inRoom = this.participantUserIdsInRoom(chatId);
+    const bothPresent = chat.participants.every((p) => inRoom.has(p.toString()));
+    if (!bothPresent) return; // eligibility сохраняем — сработает при следующей активности
+    st.eligible = false;
+    const sent = await IcebreakerService.sendIcebreaker(chatId, 'idle');
+    if (!sent) st.eligible = true;
+  }
+
+  // Стартовый айсбрейкер: оба участника зашли в комнату, сообщений ещё нет
+  private async maybeSendStartIcebreaker(chatId: string, participants: string[]): Promise<void> {
+    if (this.icebreakerStartSent.has(chatId)) return;
+    const inRoom = this.participantUserIdsInRoom(chatId);
+    if (!participants.every((p) => inRoom.has(p))) return;
+    this.icebreakerStartSent.add(chatId);
+    try {
+      if (await IcebreakerService.chatHasMessages(chatId)) return;
+      await IcebreakerService.sendIcebreaker(chatId, 'start');
+    } catch (error) {
+      wsLogger.error('icebreaker_start', 'system', error as Error, { chatId });
+    }
+  }
+
+  private async handleSuggestTopic(socket: TypedSocket, chatId: string): Promise<void> {
+    const userId = socket.data.user._id.toString();
+    const chat = await Chat.findById(chatId).select('participants isActive');
+    if (!chat || !chat.isActive) {
+      socket.emit('error', { message: 'Chat not found or inactive' });
+      return;
+    }
+    if (!chat.participants.some((p) => p.toString() === userId)) {
+      socket.emit('error', { message: 'Forbidden: not a participant of this chat' });
+      return;
+    }
+    const st = this.getIcebreakerState(chatId);
+    if (Date.now() - st.lastManualAt < config.openai.icebreakerManualCooldownMs) {
+      socket.emit('error', { message: 'Подсказка уже недавно была — подождите немного 😉' });
+      return;
+    }
+    wsLogger.event('chat_suggest_topic', userId, socket.id, { chatId });
+    // Метку кулдауна ставим ТОЛЬКО при успехе: параллельные запросы отсекает
+    // inFlight-замок в IcebreakerService, а «проигравший» раньше обнулял
+    // кулдаун только что выданной подсказки (гонка)
+    const sent = await IcebreakerService.sendIcebreaker(chatId, 'manual');
+    if (sent) {
+      st.lastManualAt = Date.now();
+      // Свежая подсказка уже в чате — авто-таймер не нужен до нового сообщения
+      st.eligible = false;
+      if (st.timer) {
+        clearTimeout(st.timer);
+        st.timer = undefined;
+      }
+    }
+  }
+
+  private cleanupIcebreakerState(chatId: string): void {
+    const st = this.icebreakerState.get(chatId);
+    if (st?.timer) clearTimeout(st.timer);
+    this.icebreakerState.delete(chatId);
+    this.icebreakerStartSent.delete(chatId);
+    IcebreakerService.forgetChat(chatId);
+  }
+
   // Очистка комнаты чата и локального состояния после завершения
   public cleanupChatRoom(chatId: string, participantIds?: string[]) {
     try {
@@ -1039,6 +1198,9 @@ export class WebSocketManager {
       }
       pendingChatEndDeadlines.delete(chatId);
       wsLogger.info('chat_end_timer_cleared_on_cleanup', `Cleared chat end timer for chat ${chatId} during cleanup`, { chatId });
+
+      // Сбрасываем состояние айсбрейкеров
+      this.cleanupIcebreakerState(chatId);
 
       // Выводим всех сокетов из комнаты
       this.io.in(roomName).socketsLeave(roomName);
@@ -1120,6 +1282,7 @@ export class WebSocketManager {
       return;
     }
     const userId = socket.data.user._id.toString();
+    this.noteTypingStart(chatId, userId);
     socket.to(`chat:${chatId}`).emit('chat:start_typing', {
       chatId,
       userId: userId,
@@ -1133,6 +1296,7 @@ export class WebSocketManager {
       return;
     }
     const userId = socket.data.user._id.toString();
+    this.noteTypingStop(chatId, userId);
     socket.to(`chat:${chatId}`).emit('chat:stop_typing', {
       chatId,
       userId: userId,

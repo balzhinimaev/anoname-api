@@ -27,6 +27,7 @@ import { authMiddleware } from './middleware/authMiddleware';
 import mongoose from 'mongoose';
 import config from './config';
 import { WebSocketManager } from './websocket/WebSocketManager';
+import { VoiceService } from './services/VoiceService';
 import prelaunchRouter from './routes/prelaunchRoutes';
 import { router as leadRouter } from './routes/leadRoutes';
 import User from './models/User';
@@ -220,7 +221,10 @@ const startServer = async () => {
     
     // Запуск очистки токенов
     setupTokenCleanup();
-    
+
+    // Плановая чистка файлов голосовых завершённых чатов (приватность)
+    VoiceService.startSweep();
+
     // Запуск сервера
     httpServer.listen(port, () => {
       logger.info(`Server is running on port ${port}`);
@@ -258,11 +262,36 @@ const startServer = async () => {
     setInterval(async () => {
       try {
         const threshold = new Date(Date.now() - ONLINE_TTL_MS);
-        await User.updateMany({ lastActive: { $lte: threshold } }, { $set: { isOnline: false } });
+        // Фильтр isOnline: true — иначе каждые полминуты переписывались ВСЕ юзеры
+        const res = await User.updateMany(
+          { isOnline: true, lastActive: { $lte: threshold } },
+          { $set: { isOnline: false } }
+        );
+        // Кто-то «протух» → подписчики должны увидеть актуальный онлайн
+        if (res.modifiedCount > 0) {
+          const { SearchService } = await import('./services/SearchService');
+          SearchService.broadcastSearchStats().catch(() => {});
+        }
       } catch (err) {
         logger.warn('Online TTL cleanup failed', err);
       }
     }, Math.max(ONLINE_TTL_MS / 2, 10_000));
+
+    // Периодический пуш статистики подписчикам (если они есть): цифры «тикают»
+    // даже без событий — например, среднее время поиска и matches24h ползут сами
+    const STATS_PUSH_MS = Number(process.env.STATS_PUSH_MS || 15_000);
+    setInterval(() => {
+      try {
+        const room = wsManager.io.sockets.adapter.rooms.get('search_stats_room');
+        if (room && room.size > 0) {
+          import('./services/SearchService')
+            .then(({ SearchService }) => SearchService.broadcastSearchStats())
+            .catch(() => {});
+        }
+      } catch (err) {
+        logger.warn('Periodic stats push failed', err);
+      }
+    }, STATS_PUSH_MS);
   } catch (error) {
     logger.error('Ошибка при запуске сервера:', error);
     if (error instanceof Error) {

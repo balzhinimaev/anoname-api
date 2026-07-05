@@ -211,4 +211,8 @@ const UserSchema: Schema = new Schema({
   timestamps: true
 });
 
+// Статистика онлайна: countDocuments({isOnline:true[, gender]}) и TTL-свип
+// {isOnline:true, lastActive:{$lte}} — без индекса были сканы всей коллекции
+UserSchema.index({ isOnline: 1, gender: 1 });
+
 export default mongoose.model<IUser>('User', UserSchema); 

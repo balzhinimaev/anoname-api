@@ -82,6 +82,9 @@ export class ChatService {
       message: messageWithSender,
     });
 
+    // Живое сообщение перезапускает таймер тишины для авто-айсбрейкера
+    wsManager.noteChatMessage(chatId, userId);
+
     return messageWithSender;
   }
 

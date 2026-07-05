@@ -18,6 +18,8 @@ export interface IChat {
   userB?: mongoose.Types.ObjectId;
   /** Последнее сообщение в чате */
   lastMessage?: mongoose.Types.ObjectId;
+  /** Грубое расстояние между участниками на момент матча (км, ступенчатое) */
+  distanceKm?: number;
   /** Тип чата: анонимный или постоянный */
   type: 'anonymous' | 'permanent';
   /** Статус активности чата */
@@ -62,6 +64,12 @@ const chatSchema = new mongoose.Schema<IChat>({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Message'
   },
+  // Грубое расстояние между участниками на момент матча (км, ступенчатое).
+  // Хранится, чтобы бейдж «📍 ~N км» переживал реконнект (session:state).
+  distanceKm: {
+    type: Number,
+    required: false
+  },
   type: {
     type: String,
     enum: ['anonymous', 'permanent'],
@@ -97,6 +105,8 @@ const chatSchema = new mongoose.Schema<IChat>({
 // Индексы для оптимизации запросов
 chatSchema.index({ participants: 1 });
 chatSchema.index({ isActive: 1 });
+// Статистика matches24h: countDocuments({createdAt: {$gte}}) — без индекса был скан всей коллекции
+chatSchema.index({ createdAt: 1 });
 chatSchema.index({ type: 1 });
 chatSchema.index({ savedBy: 1 });
 // Для поиска истории сообщений с сортировкой по времени

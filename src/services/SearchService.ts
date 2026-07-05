@@ -37,12 +37,29 @@ export interface SearchResult {
   };
 }
 
+export interface SearchStatsSnapshot {
+  t: number;        // всего в поиске
+  m: number;        // мужчин в поиске
+  f: number;        // женщин в поиске
+  inChat: number;   // людей в активных чатах (чаты × 2)
+  online: { t: number; m: number; f: number };
+  avgSearchTime: { t: number; m: number; f: number; matches24h: number };
+}
+
 export class SearchService {
+  // Статистика считается ТОЛЬКО полным пересчётом из БД (несколько countDocuments
+  // по индексам). Инкрементальный слой удалён сознательно: он дрейфовал
+  // (двойные декременты, потерянные инкременты, вечное продление TTL кэша).
   private static statsCache: {
-    data: any;
+    data: SearchStatsSnapshot;
     timestamp: number;
   } | null = null;
-  private static readonly CACHE_TTL = 5000; // 5 секунд
+  private static readonly CACHE_TTL = 3000; // 3 секунды
+  // Дебаунс рассылки: события (коннекты/поиски/матчи) приходят пачками
+  private static broadcastTimer: NodeJS.Timeout | null = null;
+  private static readonly BROADCAST_DEBOUNCE_MS = 300;
+  // Single-flight: параллельные запросы при истёкшем кэше делят один пересчёт
+  private static recomputeInFlight: Promise<SearchStatsSnapshot> | null = null;
 
   static async startSearch(
     userId: string,
@@ -125,13 +142,14 @@ export class SearchService {
     };
 
     // Добавляем местоположение только если используется геолокация и координаты предоставлены.
-    // Огрубляем до ~1 км сетки (3 знака после запятой) — снижает точность таргетинга/триангуляции,
-    // сохраняя пригодность для поиска «рядом».
+    // Огрубляем до сетки ~1.1 км (2 знака после запятой) — «ближайший без точности»:
+    // хватает для ранжирования по расстоянию, но не позволяет таргетинг/триангуляцию.
+    // (Раньше было 3 знака ≈ 110 м — точнее, чем заявляли.)
     if (criteria.useGeolocation && criteria.location) {
-      const round3 = (n: number) => Math.round(n * 1000) / 1000;
+      const round2 = (n: number) => Math.round(n * 100) / 100;
       searchData.location = {
         type: 'Point',
-        coordinates: [round3(criteria.location.longitude), round3(criteria.location.latitude)]
+        coordinates: [round2(criteria.location.longitude), round2(criteria.location.latitude)]
       };
     }
 
@@ -204,7 +222,7 @@ export class SearchService {
     }
 
     // Атомарно обновляем статистику после начала поиска
-    await this.updateAndBroadcastStats('start', userId);
+    await this.broadcastSearchStats();
 
     // Преобразуем результат в SearchResult
     return {
@@ -227,7 +245,7 @@ export class SearchService {
     );
 
     // Атомарно обновляем статистику после отмены поиска
-    await this.updateAndBroadcastStats('cancel', userId);
+    await this.broadcastSearchStats();
 
     // Аналитика: search_end (cancelled)
     if (search) {
@@ -284,43 +302,46 @@ export class SearchService {
       matchCriteria.rating = { $gte: search.minAcceptableRating };
     }
 
-    // Если мы не используем геолокацию, ищем только тех, кто тоже ее не использует
-    if (!search.useGeolocation) {
-      matchCriteria.useGeolocation = false;
-    }
-    // Если используем геолокацию, применяем стандартную логику
-    else if (search.useGeolocation && search.location && Array.isArray(search.location.coordinates)) {
-      matchCriteria.useGeolocation = true;
-      // Ограничиваем радиус поиска по конфигу тарифа/настроек
-      const DEFAULT_MAX_KM = 20; // базовый радиус по умолчанию (можно вынести в конфиг/тариф)
-      // Если в документе поиска maxDistance отсутствует (так как не храним), используем дефолт
-      const km = DEFAULT_MAX_KM;
-      const meters = km * 1000;
-      matchCriteria.location = {
-        $near: {
-          $geometry: {
-            type: 'Point',
-            coordinates: search.location.coordinates
-          },
-          $maxDistance: meters
-        }
-      };
-    } else if (search.useGeolocation) {
-      // Логируем случай, когда геолокация включена, но данные некорректны
-      wsLogger.warn('invalid_geo_data_in_find', 'Геолокация включена, но данные отсутствуют или некорректны в документе поиска', {
+    // Геолокация — ПРЕДПОЧТЕНИЕ «ближайшего», а не фильтр-сегрегация.
+    // Раньше: гео матчился только с гео в жёстком радиусе 20 км (в малолюдном
+    // регионе поиск висел вечно), не-гео — только с не-гео. Теперь:
+    //  - гео-юзер: сначала гео-кандидаты, отсортированные ПО РАССТОЯНИЮ ($near
+    //    без $maxDistance сортирует от ближнего к дальнему), затем не-гео;
+    //  - не-гео юзер: матчится со всеми (premium/очередь как раньше).
+    const hasGeo = search.useGeolocation && search.location && Array.isArray(search.location.coordinates);
+    if (search.useGeolocation && !hasGeo) {
+      wsLogger.warn('invalid_geo_data_in_find', 'Геолокация включена, но координаты отсутствуют — ищем без гео', {
         searchId: search._id?.toString(),
         location: search.location
       });
-      // В этом случае мы не можем выполнить гео-поиск, поэтому ищем без него.
-      // Это предотвратит падение, но покажет проблему в данных.
-      matchCriteria.useGeolocation = false;
     }
 
-    // Для non-geo запросов можно сразу приоритизировать очередь сортировкой по премиуму и времени ожидания
-    const isGeo = !!matchCriteria.location;
-    const candidates = !isGeo
-      ? await Search.find(matchCriteria).sort({ isPremium: -1, createdAt: 1 })
-      : await Search.find(matchCriteria);
+    let candidates: ISearch[];
+    if (hasGeo) {
+      const geoCriteria = {
+        ...matchCriteria,
+        useGeolocation: true,
+        location: {
+          $near: {
+            $geometry: {
+              type: 'Point',
+              coordinates: search.location!.coordinates
+            }
+            // Без $maxDistance: «просто ближайший», как бы далеко он ни был
+          }
+        }
+      };
+      const nonGeoCriteria = { ...matchCriteria, useGeolocation: false };
+      const CANDIDATE_LIMIT = 20; // нужен один; запас — под блок-фильтр
+      const [geoCandidates, nonGeoCandidates] = await Promise.all([
+        // порядок $near = от ближнего к дальнему, НЕ пересортировывать
+        Search.find(geoCriteria).limit(CANDIDATE_LIMIT),
+        Search.find(nonGeoCriteria).sort({ isPremium: -1, createdAt: 1 }).limit(CANDIDATE_LIMIT),
+      ]);
+      candidates = [...geoCandidates, ...nonGeoCandidates];
+    } else {
+      candidates = await Search.find(matchCriteria).sort({ isPremium: -1, createdAt: 1 }).limit(20);
+    }
 
     // Исключаем пары, где есть блок (в любую сторону)
     // Оптимизация: получаем наборы блокировок для текущего пользователя одним запросом
@@ -337,6 +358,31 @@ export class SearchService {
     }
   }
 
+  /**
+   * Грубое расстояние между двумя поисками (км) — «без точности».
+   * Координаты уже огрублены до сетки ~1.1 км; поверх — ступени округления,
+   * чтобы по числу нельзя было уточнить позицию: <1 → 1; <10 → целые км;
+   * <50 → шаг 5; <200 → шаг 25; дальше → шаг 100.
+   */
+  private static coarseDistanceKm(a?: ISearch, b?: ISearch): number | null {
+    const ca = a?.location?.coordinates;
+    const cb = b?.location?.coordinates;
+    if (!Array.isArray(ca) || !Array.isArray(cb) || ca.length < 2 || cb.length < 2) return null;
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const [lon1, lat1] = ca;
+    const [lon2, lat2] = cb;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    const km = 2 * 6371 * Math.asin(Math.sqrt(h));
+    if (!Number.isFinite(km)) return null;
+    if (km < 1) return 1;
+    if (km < 10) return Math.ceil(km);
+    if (km < 50) return Math.ceil(km / 5) * 5;
+    if (km < 200) return Math.ceil(km / 25) * 25;
+    return Math.ceil(km / 100) * 100;
+  }
+
   private static selectBestMatch(search: ISearch, matches: ISearch[]): ISearch {
     try {
       if (!matches || matches.length === 0) {
@@ -344,6 +390,12 @@ export class SearchService {
           searchId: search._id?.toString()
         });
         throw new Error('No matches available for selection');
+      }
+
+      // Гео-поиск: findMatches уже вернул кандидатов в порядке
+      // «ближайшие гео → не-гео по очереди» — берём первого (ближайшего).
+      if (search.useGeolocation && search.location) {
+        return matches[0];
       }
 
       // Приоритезация: premium первыми, затем по времени ожидания (createdAt ASC), и только затем по скору
@@ -587,6 +639,16 @@ export class SearchService {
             User.findById(search2.userId).select('rating username firstName lastName profilePhoto photos subscription').lean()
           ]);
 
+          // Грубое расстояние между собеседниками (если оба делились геопозицией).
+          // Число огрублено ступенями — точную позицию по нему не восстановить.
+          const distanceKm = this.coarseDistanceKm(search1, search2);
+          if (distanceKm !== null) {
+            // Персистим в чат: бейдж расстояния должен переживать реконнект
+            Chat.updateOne({ _id: createdChat._id }, { $set: { distanceKm } }).catch((e) => {
+              wsLogger.warn('match_distance_persist', (e as Error).message, { chatId: createdChat._id.toString() });
+            });
+          }
+
           // Уведомления пользователям (вне транзакции)
           // PII: в анонимном матче НЕ раскрываем telegramId/@username/фамилию партнёра.
           // Оставляем безопасные для отображения поля (имя, фото, пол/возраст/рейтинг).
@@ -599,7 +661,8 @@ export class SearchService {
               profilePhoto: user2Data?.profilePhoto,
               photos: user2Data?.photos,
               isPremium: !!(user2Data?.subscription?.isActive && user2Data?.subscription?.type && user2Data?.subscription?.type !== 'basic'),
-              chatId: createdChat._id.toString()
+              chatId: createdChat._id.toString(),
+              ...(distanceKm !== null ? { distanceKm } : {})
             }
           });
           wsManager.sendToUser(String(search2.userId), 'search:matched', {
@@ -611,11 +674,12 @@ export class SearchService {
               profilePhoto: user1Data?.profilePhoto,
               photos: user1Data?.photos,
               isPremium: !!(user1Data?.subscription?.isActive && user1Data?.subscription?.type && user1Data?.subscription?.type !== 'basic'),
-              chatId: createdChat._id.toString()
+              chatId: createdChat._id.toString(),
+              ...(distanceKm !== null ? { distanceKm } : {})
             }
           });
 
-          await this.updateAndBroadcastStats('match', String(search1.userId));
+          await this.broadcastSearchStats();
           await session.endSession();
           return createdChat;
         }
@@ -657,59 +721,103 @@ export class SearchService {
     throw lastError || new Error('Failed to create match after retries');
   }
 
-  static async getSearchStats() {
-    // Проверяем кэш
+  /**
+   * Полный пересчёт статистики из БД с коротким кэшем.
+   * ВАЖНО: наружу всегда уходит КОПИЯ — раньше обработчик подписки мутировал
+   * возвращённый объект и «отравлял» общий кэш для всех подписчиков.
+   */
+  static async getSearchStats(): Promise<SearchStatsSnapshot> {
     if (this.statsCache && Date.now() - this.statsCache.timestamp < this.CACHE_TTL) {
-      return this.statsCache.data;
+      return this.cloneStats(this.statsCache.data);
     }
+    return this.cloneStats(await this.recomputeStats());
+  }
 
-    // Получаем количество пользователей в поиске
-    const [totalSearching, maleSearching, femaleSearching, activeChatsCount] = await Promise.all([
+  private static cloneStats(stats: SearchStatsSnapshot): SearchStatsSnapshot {
+    return {
+      ...stats,
+      online: { ...stats.online },
+      avgSearchTime: { ...stats.avgSearchTime },
+    };
+  }
+
+  private static recomputeStats(): Promise<SearchStatsSnapshot> {
+    if (this.recomputeInFlight) return this.recomputeInFlight;
+    this.recomputeInFlight = this.doRecomputeStats().finally(() => {
+      this.recomputeInFlight = null;
+    });
+    return this.recomputeInFlight;
+  }
+
+  private static async doRecomputeStats(): Promise<SearchStatsSnapshot> {
+    const oneDayAgo = new Date(Date.now() - 24 * 3600 * 1000);
+
+    const [
+      totalSearching,
+      maleSearching,
+      femaleSearching,
+      totalOnline,
+      maleOnline,
+      femaleOnline,
+      chats24h,
+      inChatAgg,
+      avgAgg,
+    ] = await Promise.all([
       Search.countDocuments({ status: 'searching' }),
       Search.countDocuments({ status: 'searching', gender: 'male' }),
       Search.countDocuments({ status: 'searching', gender: 'female' }),
-      Chat.countDocuments({ isActive: true }),
+      User.countDocuments({ isOnline: true }),
+      User.countDocuments({ isOnline: true, gender: 'male' }),
+      User.countDocuments({ isOnline: true, gender: 'female' }),
+      // Матчи за 24ч: один чат = один матч. Раньше считали Search-доки со
+      // status:'matched' — их ДВА на матч, метрика была завышена вдвое.
+      Chat.countDocuments({ createdAt: { $gte: oneDayAgo } }),
+      // «В чате» = люди, которые сейчас ОНЛАЙН в активных чатах.
+      // Раньше считали «активные чаты × 2» — зомби-чаты (оба офлайн, ждут
+      // grace/sweep) завышали цифру. Активных чатов немного — $lookup дёшев.
+      Chat.aggregate<{ total: number }>([
+        { $match: { isActive: true } },
+        { $lookup: { from: 'users', localField: 'participants', foreignField: '_id', as: 'p' } },
+        { $project: { n: { $size: { $filter: { input: '$p', as: 'u', cond: '$$u.isOnline' } } } } },
+        { $group: { _id: null, total: { $sum: '$n' } } },
+      ]),
+      // Реальное среднее время до матча (сек) по полу. TTL-индекс хранит
+      // Search-доки ~30 минут — получается «живое» среднее по недавним матчам.
+      Search.aggregate<{ _id: string; avgMs: number }>([
+        { $match: { status: 'matched' } },
+        { $project: { gender: 1, waitMs: { $subtract: ['$updatedAt', '$createdAt'] } } },
+        { $group: { _id: '$gender', avgMs: { $avg: '$waitMs' }, n: { $sum: 1 } } },
+      ]),
     ]);
 
-    // Получаем общее количество активных пользователей онлайн
-    const totalOnline = await User.countDocuments({
-      isOnline: true
-    });
+    const toSec = (ms: number | undefined | null) =>
+      Number.isFinite(ms as number) && (ms as number) > 0 ? Math.round((ms as number) / 1000) : 0;
+    const avgByGender = new Map(avgAgg.map((r) => [r._id, r.avgMs]));
+    // Общее среднее — взвешенное по числу матчей, а не среднее средних
+    const totalN = avgAgg.reduce((s, r) => s + (r as unknown as { n: number }).n, 0);
+    const avgAllMs = totalN > 0
+      ? avgAgg.reduce((s, r) => s + r.avgMs * (r as unknown as { n: number }).n, 0) / totalN
+      : 0;
 
-    // Получаем статистику по времени поиска и мэтчам за 24 часа
-    const oneDayAgo = new Date();
-    oneDayAgo.setDate(oneDayAgo.getDate() - 1);
-
-    const matches24h = await Search.countDocuments({
-      status: 'matched',
-      updatedAt: { $gte: oneDayAgo }
-    });
-
-    // Собираем и возвращаем статистику
-    const stats = {
+    const stats: SearchStatsSnapshot = {
       t: totalSearching,
       m: maleSearching,
       f: femaleSearching,
-      inChat: activeChatsCount * 2, // Каждый активный чат имеет 2 участника
+      inChat: inChatAgg[0]?.total || 0,
       online: {
         t: totalOnline,
-        m: 0,
-        f: 0
+        m: maleOnline,
+        f: femaleOnline,
       },
       avgSearchTime: {
-        t: 0, // Эти значения могут быть заполнены реальными данными позже
-        m: 0,
-        f: 0,
-        matches24h
-      }
+        t: toSec(avgAllMs),
+        m: toSec(avgByGender.get('male')),
+        f: toSec(avgByGender.get('female')),
+        matches24h: chats24h,
+      },
     };
 
-    // Обновляем кэш
-    this.statsCache = {
-      data: stats,
-      timestamp: Date.now()
-    };
-
+    this.statsCache = { data: stats, timestamp: Date.now() };
     return stats;
   }
 
@@ -720,101 +828,31 @@ export class SearchService {
     });
   }
 
-  public static async broadcastSearchStats() {
-    try {
-      const stats = await this.getSearchStats();
-      wsManager.io.to('search_stats_room').emit('search:stats', stats);
-      return stats; // Возвращаем stats для соответствия предыдущему Promise<any>
-    } catch (error) {
-      logger.error('Failed to broadcast search stats', {
-        error: error instanceof Error ? { message: error.message, stack: error.stack } : error
-      });
-      return null; // Возвращаем null в случае ошибки
-    }
-  }
-
-  private static async updateAndBroadcastStats(action: 'start' | 'cancel' | 'match', userId: string) {
-    // Вынесли обновление статистики в отдельный метод для атомарности
-    try {
-      // Если статистика уже обновляется, планируем еще одно обновление после завершения текущего
-      if (this.updatingStats) {
-        this.pendingUpdates = true;
-        return;
-      }
-
-      this.updatingStats = true;
-
-      // Если у нас есть кэш и он свежий, то обновим его инкрементально
-      if (this.statsCache && Date.now() - this.statsCache.timestamp < this.CACHE_TTL) {
-        // Получаем пол пользователя для инкрементного обновления статистики
-        const user = await Search.findOne({ userId });
-        const gender = user?.gender;
-
-        if (gender) {
-          // Логируем, что выполняем инкрементное обновление
-          wsLogger.info('stats_incremental_update', 'Инкрементное обновление кэша (' + action + ' поиска)', {
-            gender,
-            userId
+  /**
+   * Сигнал «данные статистики изменились» (поиск/матч/коннект/конец чата):
+   * инвалидирует кэш и рассылает свежий пересчёт с дебаунсом — пачка событий
+   * (например, матч = два ушли из поиска + чат создан) даёт одну рассылку.
+   * Никакой инкрементальной арифметики: только пересчёт из БД.
+   */
+  public static async broadcastSearchStats(): Promise<void> {
+    this.statsCache = null;
+    if (this.broadcastTimer) return; // рассылка уже запланирована — событие войдёт в неё
+    this.broadcastTimer = setTimeout(() => {
+      this.broadcastTimer = null;
+      // getSearchStats: если кэш уже освежили в окне дебаунса — без лишнего пересчёта
+      this.getSearchStats()
+        .then((stats) => {
+          wsManager.io.to('search_stats_room').emit('search:stats', stats);
+        })
+        .catch((error) => {
+          logger.error('Failed to broadcast search stats', {
+            error: error instanceof Error ? { message: error.message, stack: error.stack } : error
           });
-
-          // Инкрементально обновляем статистику в зависимости от действия
-          if (action === 'start') {
-            this.statsCache.data.t++;
-            if (gender === 'male') this.statsCache.data.m++;
-            else if (gender === 'female') this.statsCache.data.f++;
-          } else if (action === 'cancel') {
-            this.statsCache.data.t = Math.max(0, this.statsCache.data.t - 1);
-            if (gender === 'male') this.statsCache.data.m = Math.max(0, this.statsCache.data.m - 1);
-            else if (gender === 'female') this.statsCache.data.f = Math.max(0, this.statsCache.data.f - 1);
-          } else if (action === 'match') {
-            // При мэтче двое покидают поиск
-            this.statsCache.data.t = Math.max(0, this.statsCache.data.t - 2);
-            
-            // Двое входят в чат
-            this.statsCache.data.inChat = (this.statsCache.data.inChat || 0) + 2;
-            
-            // Увеличиваем счетчик мэтчей
-            this.statsCache.data.avgSearchTime.matches24h++;
-            
-            // Мы не знаем пол второго участника, поэтому просто сокращаем общее количество
-            // и корректируем пол известного нам участника
-            if (gender === 'male') this.statsCache.data.m = Math.max(0, this.statsCache.data.m - 1);
-            else if (gender === 'female') this.statsCache.data.f = Math.max(0, this.statsCache.data.f - 1);
-          }
-
-          // Обновляем временную метку кэша
-          this.statsCache.timestamp = Date.now();
-        }
-      } else {
-        // Если кэша нет или он устарел, запрашиваем полные данные
-        await this.getSearchStats();
-      }
-
-      // Отправляем обновленную статистику всем подписчикам
-      wsLogger.info('stats_force_update', 'Статистика отправлена после действия: ' + action, {
-        userId,
-        stats: this.statsCache?.data,
-        fromCache: !!this.statsCache
-      });
-      await this.broadcastSearchStats();
-
-      this.updatingStats = false;
-
-      // Если были отложенные обновления, выполняем еще одно
-      if (this.pendingUpdates) {
-        this.pendingUpdates = false;
-        // Используем setTimeout, чтобы избежать слишком глубокой рекурсии
-        setTimeout(() => this.broadcastSearchStats(), 0);
-      }
-    } catch (error) {
-      this.updatingStats = false;
-      logger.error('Failed to update and broadcast stats', {
-        error: error instanceof Error ? { message: error.message, stack: error.stack } : error
-      });
-      throw error;
-    }
+        });
+    }, this.BROADCAST_DEBOUNCE_MS);
+    // Таймер не должен держать процесс при остановке
+    this.broadcastTimer.unref?.();
   }
 
-  private static updatingStats = false;
-  private static pendingUpdates = false;
-} 
+
+}
