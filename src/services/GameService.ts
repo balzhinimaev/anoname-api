@@ -10,7 +10,7 @@
 
 export type OutEvent =
   | { toUserId: string; event: 'game:invite'; data: { gameId: string; by: string; title: string } }
-  | { toUserId: string; event: 'game:start'; data: { gameId: string; role: GameRole; word?: string; mask?: string; myScore: number; opponentScore: number; round: number; roundSeconds: number; targetScore: number } }
+  | { toUserId: string; event: 'game:start'; data: { gameId: string; role: GameRole; word?: string; mask?: string; question?: { text: string; options: string[] }; myScore: number; opponentScore: number; round: number; roundSeconds: number; targetScore: number } }
   | { toUserId: string; event: 'game:choose'; data: { role: GameRole; words?: string[]; chooseSeconds: number; round: number; myScore: number; opponentScore: number; targetScore: number } }
   | { toUserId: string; event: 'game:event'; data: { type: string; payload?: any } }
   | { toUserId: string; event: 'game:end'; data: { reason?: string; youWon?: boolean; myScore?: number; opponentScore?: number } };
@@ -36,27 +36,45 @@ export interface GameState {
   word: string;
   choosing: boolean;      // рисующий сейчас выбирает слово из candidates
   candidates: string[];   // предложенные на выбор слова (только пока choosing)
+  hintMask?: string;      // маска с подсказкой-буквой (после середины раунда)
+  // специфично для match-quiz
+  quiz?: {
+    question: { text: string; options: string[] } | null;
+    answers: Record<string, number>;
+    matches: number;
+    total: number;
+    usedIdx: number[];
+  };
 }
 
 interface GameDefinition {
   id: string;
   title: string;
+  /** false → раунд начинается сразу с game:start (без фазы выбора слова). */
+  hasChoosePhase?: boolean;
+  /** Пер-игровая длительность раунда (сек); по умолчанию ROUND_SECONDS. */
+  roundSecondsOverride?: number;
+  /** Подготовка данных нового раунда для игр без фазы выбора (например, следующий вопрос). */
+  prepareRound?(state: GameState): void;
+  /** Событие середины раунда (например, подсказка-буква). null → ничего не слать. */
+  onHalfTime?(state: GameState): Array<{ type: string; payload?: any }> | null;
   /** Начальное состояние новой игры (starter ходит первым «рисующим»). */
   init(players: [string, string], starterId: string): GameState;
-  /** Роль игрока + приватные данные для game:start (рисующему — слово, угадывающему — маску). */
-  startInfo(state: GameState, userId: string): { role: GameRole; word?: string; mask?: string };
+  /** Роль игрока + приватные данные для game:start (рисующему — слово, угадывающему — маску, в квизе — вопрос). */
+  startInfo(state: GameState, userId: string): { role: GameRole; word?: string; mask?: string; question?: { text: string; options: string[] } };
   /** N уникальных слов на выбор рисующему (начало раунда). */
   pickCandidates(count: number, exclude?: string): string[];
   /** Обработка in-game события. restart=true → новый раунд (фаза выбора слова).
-   *  startNow=true → слово выбрано, пора начинать рисование (game:start + таймер раунда). */
+   *  startNow=true → слово выбрано, пора начинать рисование (game:start + таймер раунда).
+   *  finished=true → игра окончена без победителя (кооперативный финал). */
   onEvent(
     state: GameState,
     fromUserId: string,
     type: string,
     payload: any
-  ): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean; startNow?: boolean; winnerId?: string };
+  ): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean; startNow?: boolean; winnerId?: string; finished?: boolean };
   /** Истёк таймер раунда. Вернуть события и (обычно) restart для нового раунда. */
-  onTimeout(state: GameState): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean };
+  onTimeout(state: GameState): { events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }>; restart?: boolean; finished?: boolean };
 }
 
 // ── Банк слов для «Угадай рисунок» (простые, рисуемые) ──────────────────────────
@@ -147,7 +165,22 @@ const drawGuess: GameDefinition = {
     const role: GameRole = userId === state.drawerId ? 'drawer' : 'guesser';
     return role === 'drawer'
       ? { role, word: state.word }
-      : { role, mask: maskOf(state.word) };
+      : { role, mask: state.hintMask || maskOf(state.word) };
+  },
+
+  /** Середина раунда: раскрываем угадывающему одну случайную букву. */
+  onHalfTime(state) {
+    if (!state.word || state.choosing) return null;
+    const letters = state.word.split('');
+    const idxs = letters.map((ch, i) => (ch === ' ' ? -1 : i)).filter((i) => i >= 0);
+    if (idxs.length < 3) return null; // короткие слова не подсказываем
+    const revealIdx = idxs[Math.floor(Math.random() * idxs.length)];
+    const mask = letters
+      .map((ch, i) => (ch === ' ' ? ' ' : i === revealIdx ? ch.toUpperCase() : '•'))
+      .join(' ')
+      .trim();
+    state.hintMask = mask;
+    return [{ type: 'hint', payload: { mask } }];
   },
 
   pickCandidates(count, exclude) {
@@ -233,8 +266,150 @@ const drawGuess: GameDefinition = {
   },
 };
 
+// ── Игра «Совпадения» — quiz-дихотомии для знакомства ──────────────────────────
+// Оба втайне отвечают на один вопрос; совпадение = 💘. Кооперативный счёт.
+const QUIZ_QUESTIONS: Array<{ text: string; options: string[] }> = [
+  { text: 'Идеальный вечер?', options: ['Дома под плед', 'Куда-нибудь выбраться'] },
+  { text: 'Море или горы?', options: ['Море', 'Горы'] },
+  { text: 'Кофе или чай?', options: ['Кофе', 'Чай'] },
+  { text: 'Сова или жаворонок?', options: ['Сова', 'Жаворонок'] },
+  { text: 'Кошки или собаки?', options: ['Кошки', 'Собаки'] },
+  { text: 'Зима или лето?', options: ['Зима', 'Лето'] },
+  { text: 'Готовить дома или заказать доставку?', options: ['Готовить', 'Доставка'] },
+  { text: 'Спонтанная поездка или всё по плану?', options: ['Спонтанно', 'По плану'] },
+  { text: 'Кино дома или в кинотеатре?', options: ['Дома', 'В кинотеатре'] },
+  { text: 'Сладкое или солёное?', options: ['Сладкое', 'Солёное'] },
+  { text: 'Опоздать или прийти сильно заранее?', options: ['Опоздать', 'Заранее'] },
+  { text: 'Текст или голосовое?', options: ['Текст', 'Голосовое'] },
+  { text: 'Большая компания или пара близких друзей?', options: ['Компания', 'Пара близких'] },
+  { text: 'Город или природа?', options: ['Город', 'Природа'] },
+  { text: 'Душ утром или вечером?', options: ['Утром', 'Вечером'] },
+  { text: 'Пицца или суши?', options: ['Пицца', 'Суши'] },
+  { text: 'Сериал залпом или по серии?', options: ['Залпом', 'По серии'] },
+  { text: 'Танцевать или смотреть, как танцуют?', options: ['Танцевать', 'Смотреть'] },
+  { text: 'Первым написать или ждать сообщения?', options: ['Написать', 'Ждать'] },
+  { text: 'Вечеринка или настолки?', options: ['Вечеринка', 'Настолки'] },
+  { text: 'Поход в горы или отель всё включено?', options: ['Поход', 'Всё включено'] },
+  { text: 'Книга или подкаст?', options: ['Книга', 'Подкаст'] },
+  { text: 'Завтрак — сладкий или сытный?', options: ['Сладкий', 'Сытный'] },
+  { text: 'Гулять под дождём или смотреть на него из окна?', options: ['Гулять', 'Из окна'] },
+  { text: 'Отпуск: один большой или несколько маленьких?', options: ['Один большой', 'Несколько'] },
+  { text: 'Звонок или переписка?', options: ['Звонок', 'Переписка'] },
+  { text: 'Утро без будильника или ранний подъём?', options: ['Без будильника', 'Ранний подъём'] },
+  { text: 'Немного опасно, но весело — или спокойно и надёжно?', options: ['Весело', 'Надёжно'] },
+  { text: 'Комедия или триллер?', options: ['Комедия', 'Триллер'] },
+  { text: 'Подарок-сюрприз или спросить, что подарить?', options: ['Сюрприз', 'Спросить'] },
+  { text: 'Наличные или карта?', options: ['Наличные', 'Карта'] },
+  { text: 'Молчать вместе — уютно или неловко?', options: ['Уютно', 'Неловко'] },
+  { text: 'Переезд в другую страну — да или страшно?', options: ['Да!', 'Страшно'] },
+  { text: 'Экспромт-караоке: поёте или ни за что?', options: ['Пою!', 'Ни за что'] },
+  { text: 'Идеальное свидание — днём или ночью?', options: ['Днём', 'Ночью'] },
+  { text: 'Спорт вместе или каждый сам?', options: ['Вместе', 'Каждый сам'] },
+];
+const QUIZ_ROUNDS = 10;
+const QUIZ_ROUND_SECONDS = 30;
+
+const matchQuiz: GameDefinition = {
+  id: 'match-quiz',
+  title: 'Совпадения',
+  hasChoosePhase: false,
+  roundSecondsOverride: QUIZ_ROUND_SECONDS,
+
+  init(players, starterId) {
+    return {
+      gameId: 'match-quiz',
+      players,
+      scores: { [players[0]]: 0, [players[1]]: 0 },
+      round: 1,
+      drawerId: starterId, // не используется квизом (поле каркаса)
+      word: '',
+      choosing: false,
+      candidates: [],
+      quiz: { question: null, answers: {}, matches: 0, total: QUIZ_ROUNDS, usedIdx: [] },
+    };
+  },
+
+  prepareRound(state) {
+    const q = state.quiz!;
+    q.answers = {};
+    const available = QUIZ_QUESTIONS.map((_, i) => i).filter((i) => !q.usedIdx.includes(i));
+    const pick = available.length
+      ? available[Math.floor(Math.random() * available.length)]
+      : Math.floor(Math.random() * QUIZ_QUESTIONS.length);
+    q.usedIdx.push(pick);
+    q.question = QUIZ_QUESTIONS[pick];
+  },
+
+  startInfo(state) {
+    // Ролей нет — оба отвечают; вопрос одинаковый для обоих
+    return { role: 'guesser', question: state.quiz?.question || undefined };
+  },
+
+  pickCandidates() {
+    return [];
+  },
+
+  onEvent(state, fromUserId, type, payload) {
+    if (type !== 'answer') return { events: [] };
+    const q = state.quiz;
+    if (!q || !q.question) return { events: [] };
+    const idx = Number(payload?.index);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= q.question.options.length) return { events: [] };
+    if (q.answers[fromUserId] !== undefined) return { events: [] }; // уже отвечал
+
+    q.answers[fromUserId] = idx;
+    const other = state.players.find((p) => p !== fromUserId)!;
+    if (q.answers[other] === undefined) {
+      // Ждём второго: партнёру — «собеседник ответил», себе — подтверждение
+      return { events: [{ to: 'other', type: 'partner_answered' }] };
+    }
+
+    // Оба ответили → раскрытие
+    const mine = q.answers[fromUserId];
+    const theirs = q.answers[other];
+    const matched = mine === theirs;
+    if (matched) {
+      q.matches += 1;
+      state.players.forEach((p) => { state.scores[p] = q.matches; });
+    }
+    const base = {
+      question: q.question.text,
+      options: q.question.options,
+      matched,
+      matches: q.matches,
+      round: state.round,
+      total: q.total,
+    };
+    const events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }> = [
+      { to: 'self', type: 'reveal', payload: { ...base, mine, partner: theirs } },
+      { to: 'other', type: 'reveal', payload: { ...base, mine: theirs, partner: mine } },
+    ];
+    if (state.round >= q.total) {
+      events.push({ to: 'both', type: 'quiz_final', payload: { matches: q.matches, total: q.total } });
+      return { events, finished: true };
+    }
+    state.round += 1;
+    return { events, restart: true };
+  },
+
+  onTimeout(state) {
+    // Вопрос просрочен: без совпадения, дальше (или финал, если это был последний)
+    const q = state.quiz!;
+    const events: Array<{ to: 'self' | 'other' | 'both'; type: string; payload?: any }> = [
+      { to: 'both', type: 'quiz_timeout', payload: { round: state.round } },
+    ];
+    if (state.round >= q.total) {
+      events.push({ to: 'both', type: 'quiz_final', payload: { matches: q.matches, total: q.total } });
+      return { events, finished: true };
+    }
+    state.round += 1;
+    return { events, restart: true };
+  },
+};
+
 const GAMES: Record<string, GameDefinition> = {
   [drawGuess.id]: drawGuess,
+  [matchQuiz.id]: matchQuiz,
 };
 
 interface Session {
@@ -245,6 +420,7 @@ interface Session {
   status: 'pending' | 'active';
   chatId: string;
   timer?: NodeJS.Timeout; // таймер текущего раунда
+  hintTimer?: NodeJS.Timeout; // таймер события середины раунда (подсказка)
   roundEndsAt?: number; // ms epoch окончания текущего раунда (для ресинка при reconnect)
 }
 
@@ -294,7 +470,7 @@ export class GameManager {
     const s = this.sessions.get(chatId);
     if (!s || s.status !== 'active' || !s.state) return [];
     if (!s.players.includes(fromUserId)) return [];
-    const { events, restart, startNow, winnerId } = s.def.onEvent(s.state, fromUserId, type, payload);
+    const { events, restart, startNow, winnerId, finished } = s.def.onEvent(s.state, fromUserId, type, payload);
     const out: OutEvent[] = [];
     for (const e of events) {
       const targets = e.to === 'both' ? s.players : e.to === 'self' ? [fromUserId] : [s.players.find((p) => p !== fromUserId)!];
@@ -302,7 +478,7 @@ export class GameManager {
         out.push({ toUserId: t, event: 'game:event', data: { type: e.type, payload: e.payload } });
       }
     }
-    if (winnerId) {
+    if (winnerId || finished) {
       out.push(...this.finishEvents(s, winnerId));
       this.clearSession(chatId);
       return out;
@@ -312,9 +488,14 @@ export class GameManager {
     return out;
   }
 
-  /** Начало раунда: рисующему предлагаются слова на выбор, угадывающий ждёт. */
+  /** Начало раунда: фаза выбора слова, либо сразу game:start (игры без выбора). */
   private beginRound(s: Session): OutEvent[] {
     const st = s.state!;
+    st.hintMask = undefined;
+    if (s.def.hasChoosePhase === false) {
+      s.def.prepareRound?.(st);
+      return this.startEvents(s);
+    }
     st.choosing = true;
     st.candidates = s.def.pickCandidates(CHOICE_COUNT);
     st.word = '';
@@ -351,6 +532,11 @@ export class GameManager {
     return this.leave(chatId, '');
   }
 
+  /** Длительность раунда конкретной игры (мс). */
+  private roundMsFor(s: Session): number {
+    return s.def.roundSecondsOverride ? s.def.roundSecondsOverride * 1000 : this.roundMs;
+  }
+
   /** game:start обоим игрокам (роль-специфично) + перезапуск таймера раунда. */
   private startEvents(s: Session): OutEvent[] {
     const st = s.state!;
@@ -366,18 +552,20 @@ export class GameManager {
           role: info.role,
           word: info.word,
           mask: info.mask,
+          question: info.question,
           myScore: st.scores[p] || 0,
           opponentScore: st.scores[other] || 0,
           round: st.round,
-          roundSeconds: Math.round(this.roundMs / 1000),
-          targetScore: TARGET_SCORE,
+          roundSeconds: Math.round(this.roundMsFor(s) / 1000),
+          targetScore: st.quiz ? st.quiz.total : TARGET_SCORE,
         },
       };
     });
   }
 
-  /** Персонализированный game:end по итогам игры (победа/поражение + счёт). */
-  private finishEvents(s: Session, winnerId: string): OutEvent[] {
+  /** Персонализированный game:end по итогам игры (победа/поражение + счёт).
+   *  Без winnerId — кооперативный финал (youWon не отправляется). */
+  private finishEvents(s: Session, winnerId?: string): OutEvent[] {
     const st = s.state!;
     return s.players.map((p) => {
       const other = s.players.find((x) => x !== p)!;
@@ -386,7 +574,7 @@ export class GameManager {
         event: 'game:end' as const,
         data: {
           reason: 'finished',
-          youWon: p === winnerId,
+          ...(winnerId ? { youWon: p === winnerId } : {}),
           myScore: st.scores[p] || 0,
           opponentScore: st.scores[other] || 0,
         },
@@ -394,17 +582,39 @@ export class GameManager {
     });
   }
 
-  /** (Пере)запуск таймера раунда активной сессии. */
+  /** (Пере)запуск таймера раунда активной сессии (+ подсказка середины раунда). */
   private armTimer(s: Session): void {
     if (s.timer) clearTimeout(s.timer);
-    s.roundEndsAt = Date.now() + this.roundMs;
-    s.timer = setTimeout(() => this.onRoundTimeout(s.chatId), this.roundMs);
+    if (s.hintTimer) clearTimeout(s.hintTimer);
+    const ms = this.roundMsFor(s);
+    s.roundEndsAt = Date.now() + ms;
+    s.timer = setTimeout(() => this.onRoundTimeout(s.chatId), ms);
     s.timer.unref?.();
+    if (s.def.onHalfTime) {
+      s.hintTimer = setTimeout(() => this.onHalfTime(s.chatId), Math.round(ms / 2));
+      s.hintTimer.unref?.();
+    }
+  }
+
+  /** Середина раунда: игра может подсластить ожидание (подсказка-буква). */
+  private onHalfTime(chatId: string): void {
+    const s = this.sessions.get(chatId);
+    if (!s || s.status !== 'active' || !s.state || s.state.choosing) return;
+    const evs = s.def.onHalfTime?.(s.state);
+    if (!evs || evs.length === 0) return;
+    const out: OutEvent[] = [];
+    for (const e of evs) {
+      for (const t of s.players) {
+        out.push({ toUserId: t, event: 'game:event', data: { type: e.type, payload: e.payload } });
+      }
+    }
+    this.dispatcher?.(out);
   }
 
   /** Таймер фазы выбора слова: по истечении — авто-выбор первого кандидата. */
   private armChoiceTimer(s: Session): void {
     if (s.timer) clearTimeout(s.timer);
+    if (s.hintTimer) clearTimeout(s.hintTimer);
     s.roundEndsAt = undefined; // раунд ещё не идёт
     s.timer = setTimeout(() => this.onChoiceTimeout(s.chatId), CHOOSE_SECONDS * 1000);
     s.timer.unref?.();
@@ -455,7 +665,7 @@ export class GameManager {
     }
 
     const info = s.def.startInfo(st, userId);
-    const remainingMs = s.roundEndsAt ? Math.max(0, s.roundEndsAt - Date.now()) : this.roundMs;
+    const remainingMs = s.roundEndsAt ? Math.max(0, s.roundEndsAt - Date.now()) : this.roundMsFor(s);
     return [{
       toUserId: userId,
       event: 'game:start',
@@ -464,11 +674,12 @@ export class GameManager {
         role: info.role,
         word: info.word,
         mask: info.mask,
+        question: info.question,
         myScore: st.scores[userId] || 0,
         opponentScore: st.scores[other] || 0,
         round: st.round,
         roundSeconds: Math.max(1, Math.round(remainingMs / 1000)),
-        targetScore: TARGET_SCORE,
+        targetScore: st.quiz ? st.quiz.total : TARGET_SCORE,
       },
     }];
   }
@@ -477,7 +688,7 @@ export class GameManager {
   private onRoundTimeout(chatId: string): void {
     const s = this.sessions.get(chatId);
     if (!s || s.status !== 'active' || !s.state) return;
-    const { events, restart } = s.def.onTimeout(s.state);
+    const { events, restart, finished } = s.def.onTimeout(s.state);
     const out: OutEvent[] = [];
     for (const e of events) {
       // без инициатора события адресуем обоим игрокам
@@ -485,7 +696,12 @@ export class GameManager {
         out.push({ toUserId: t, event: 'game:event', data: { type: e.type, payload: e.payload } });
       }
     }
-    if (restart) out.push(...this.beginRound(s)); // новый раунд → выбор слова
+    if (finished) {
+      out.push(...this.finishEvents(s));
+      this.clearSession(chatId);
+    } else if (restart) {
+      out.push(...this.beginRound(s)); // новый раунд → выбор слова
+    }
     this.dispatcher?.(out);
   }
 
@@ -493,6 +709,7 @@ export class GameManager {
   private clearSession(chatId: string): void {
     const s = this.sessions.get(chatId);
     if (s?.timer) clearTimeout(s.timer);
+    if (s?.hintTimer) clearTimeout(s.hintTimer);
     this.sessions.delete(chatId);
   }
 }

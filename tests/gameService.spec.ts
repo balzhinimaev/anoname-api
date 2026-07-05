@@ -302,8 +302,12 @@ describe('таймеры (выбор + раунд)', () => {
   it('истечение раунда → timeout обоим + новый выбор (game:choose), роли меняются', () => {
     const { dispatched, word } = startDrawing();
     jest.advanceTimersByTime(5000);
-    expect(dispatched).toHaveLength(1);
-    const out = dispatched[0];
+    // 2 диспатча: подсказка-буква на середине раунда + сам timeout
+    expect(dispatched).toHaveLength(2);
+    const hint = dispatched[0].find((e) => (e.data as any).type === 'hint') as any;
+    expect(hint).toBeTruthy();
+    expect(String(hint.data.payload.mask)).toMatch(/[а-яa-z]/i); // буква раскрыта
+    const out = dispatched[1];
     const timeouts = out.filter((e) => (e.data as any).type === 'timeout');
     expect(timeouts.map((e) => e.toUserId).sort()).toEqual([A, B]);
     expect((timeouts[0].data as any).payload.word).toBe(word);
@@ -314,10 +318,11 @@ describe('таймеры (выбор + раунд)', () => {
 
   it('верная догадка снимает round timer (старый дедлайн не срабатывает)', () => {
     const { gm, dispatched, word } = startDrawing();
-    jest.advanceTimersByTime(4000);
+    jest.advanceTimersByTime(4000); // на 2.5с прилетела подсказка-буква
     gm.event(CHAT, B, 'guess', { text: word }); // → фаза выбора (round timer снят, взведён choice 15s)
-    jest.advanceTimersByTime(1500); // старый round-дедлайн (5s) прошёл — ничего
-    expect(dispatched).toHaveLength(0);
+    jest.advanceTimersByTime(1500); // старый round-дедлайн (5s) прошёл — ничего нового
+    expect(dispatched).toHaveLength(1); // только подсказка, timeout НЕ сработал
+    expect((dispatched[0][0].data as any).type).toBe('hint');
   });
 
   it('после leave таймер не срабатывает', () => {
@@ -353,5 +358,97 @@ describe('подсказки: маска и «почти»', () => {
     const out = gm.event(CHAT, B, 'guess', { text: 'йцукенгшщз' });
     expect(out.some((e) => (e.data as any).type === 'close')).toBe(false);
     expect(out.some((e) => e.toUserId === A && (e.data as any).type === 'guess')).toBe(true);
+  });
+});
+
+
+// ── Игра «Совпадения» (match-quiz) ─────────────────────────────────────────────
+describe('match-quiz', () => {
+  function startQuiz(): { gm: GameManager; startOut: OutEvent[] } {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'match-quiz', PLAYERS);
+    const startOut = gm.respond(CHAT, B, true); // без фазы выбора — сразу game:start
+    return { gm, startOut };
+  }
+
+  it('в каталоге; accept → сразу game:start с вопросом обоим (без game:choose)', () => {
+    expect(GameManager.catalog()).toEqual(expect.arrayContaining([{ id: 'match-quiz', title: 'Совпадения' }]));
+    const { startOut } = startQuiz();
+    const starts = startOut.filter((e) => e.event === 'game:start');
+    expect(starts).toHaveLength(2);
+    const qa = (starts[0].data as any).question;
+    const qb = (starts[1].data as any).question;
+    expect(qa?.text).toBeTruthy();
+    expect(qa.options.length).toBeGreaterThanOrEqual(2);
+    expect(qb.text).toBe(qa.text); // вопрос одинаковый
+    expect(startOut.some((e) => e.event === 'game:choose')).toBe(false);
+  });
+
+  it('первый ответ → partner_answered второму; совпадение → reveal с matched и рост счёта', () => {
+    const { gm } = startQuiz();
+    const out1 = gm.event(CHAT, A, 'answer', { index: 0 });
+    expect(out1).toHaveLength(1);
+    expect(out1[0].toUserId).toBe(B);
+    expect((out1[0].data as any).type).toBe('partner_answered');
+
+    const out2 = gm.event(CHAT, B, 'answer', { index: 0 });
+    const reveals = out2.filter((e) => (e.data as any).type === 'reveal');
+    expect(reveals.map((e) => e.toUserId).sort()).toEqual([A, B]);
+    const rA = reveals.find((e) => e.toUserId === A)!.data as any;
+    expect(rA.payload.matched).toBe(true);
+    expect(rA.payload.matches).toBe(1);
+    // следующий раунд стартует сразу (game:start с новым вопросом)
+    const nextStarts = out2.filter((e) => e.event === 'game:start');
+    expect(nextStarts).toHaveLength(2);
+    expect((nextStarts[0].data as any).round).toBe(2);
+  });
+
+  it('несовпадение → matched=false, счёт не растёт; повторный ответ игнорируется', () => {
+    const { gm } = startQuiz();
+    gm.event(CHAT, A, 'answer', { index: 0 });
+    expect(gm.event(CHAT, A, 'answer', { index: 1 })).toHaveLength(0); // не переголосовать
+    const out = gm.event(CHAT, B, 'answer', { index: 1 });
+    const rB = out.find((e) => e.toUserId === B && (e.data as any).type === 'reveal')!.data as any;
+    expect(rB.payload.matched).toBe(false);
+    expect(rB.payload.matches).toBe(0);
+    expect(rB.payload.mine).toBe(1);
+    expect(rB.payload.partner).toBe(0);
+  });
+
+  it('после последнего раунда — quiz_final и кооперативный game:end (без youWon)', () => {
+    const { gm } = startQuiz();
+    let final: OutEvent[] = [];
+    for (let r = 0; r < 10; r++) {
+      gm.event(CHAT, A, 'answer', { index: 0 });
+      final = gm.event(CHAT, B, 'answer', { index: 0 });
+    }
+    const quizFinal = final.filter((e) => (e.data as any).type === 'quiz_final');
+    expect(quizFinal.map((e) => e.toUserId).sort()).toEqual([A, B]);
+    expect((quizFinal[0].data as any).payload).toEqual({ matches: 10, total: 10 });
+    const ends = final.filter((e) => e.event === 'game:end');
+    expect(ends).toHaveLength(2);
+    const endA = ends.find((e) => e.toUserId === A)!.data as any;
+    expect(endA.reason).toBe('finished');
+    expect(endA.youWon).toBeUndefined(); // кооператив — победителя нет
+    expect(endA.myScore).toBe(10);
+    // сессия закрыта — дальнейшие события игнорируются
+    expect(gm.event(CHAT, A, 'answer', { index: 0 })).toHaveLength(0);
+  });
+
+  it('таймаут вопроса → quiz_timeout обоим и следующий вопрос (диспетчер)', () => {
+    jest.useFakeTimers();
+    const gm = new GameManager();
+    const dispatched: OutEvent[][] = [];
+    gm.setDispatcher((evts) => dispatched.push(evts));
+    gm.invite(CHAT, A, 'match-quiz', PLAYERS);
+    gm.respond(CHAT, B, true);
+    jest.advanceTimersByTime(30_000); // QUIZ_ROUND_SECONDS
+    const out = dispatched.flat();
+    const timeouts = out.filter((e) => (e.data as any).type === 'quiz_timeout');
+    expect(timeouts.map((e) => e.toUserId).sort()).toEqual([A, B]);
+    const nextStarts = out.filter((e) => e.event === 'game:start');
+    expect(nextStarts).toHaveLength(2);
+    expect((nextStarts[0].data as any).round).toBe(2);
+    jest.useRealTimers();
   });
 });
