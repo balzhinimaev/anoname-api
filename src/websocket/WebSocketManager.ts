@@ -207,7 +207,7 @@ export class WebSocketManager {
         // Берем из User: telegramId, gender, age, rating, username/имя/фото, премиум статус
         try {
           // PII: НЕ раскрываем telegramId/@username/фамилию партнёра при гидратации сессии.
-          const other = await User.findById(otherParticipant).select('gender age rating firstName profilePhoto photos subscription');
+          const other = await User.findById(otherParticipant).select('gender age rating firstName profilePhoto photos subscription preferences.acceptVoice');
           if (other) {
             matchedUser = {
               gender: other.gender as any,
@@ -218,6 +218,7 @@ export class WebSocketManager {
               photos: other.photos,
               isPremium: !!(other.subscription?.isActive && other.subscription?.type && other.subscription?.type !== 'basic'),
               chatId,
+              acceptsVoice: other.preferences?.acceptVoice !== false,
               // Грубое расстояние из чата — бейдж «📍 ~N км» переживает реконнект
               ...(typeof (activeChat as { distanceKm?: number }).distanceKm === 'number'
                 ? { distanceKm: (activeChat as { distanceKm?: number }).distanceKm }

@@ -4,6 +4,7 @@ import path from 'path';
 import mongoose from 'mongoose';
 import Chat from '../models/Chat';
 import Message, { IMessage } from '../models/Message';
+import User from '../models/User';
 import Report from '../models/Report';
 import { BlockService } from './BlockService';
 import { wsManager } from '../server';
@@ -75,6 +76,14 @@ class VoiceServiceImpl {
       const otherUserId = chat.participants.map((p) => p.toString()).find((p) => p !== userId);
       if (otherUserId && (await BlockService.anyBlockBetween(userId, otherUserId))) {
         throw new VoiceError(403, 'Messaging blocked by user settings');
+      }
+      // Приватность получателя: запрет на приём голосовых (кнопка у отправителя
+      // скрыта по acceptsVoice из матча, но сервер — источник истины)
+      if (otherUserId) {
+        const recipient = await User.findById(otherUserId).select('preferences.acceptVoice').lean();
+        if ((recipient as { preferences?: { acceptVoice?: boolean } } | null)?.preferences?.acceptVoice === false) {
+          throw new VoiceError(403, 'Собеседник отключил приём голосовых сообщений');
+        }
       }
 
       // Идемпотентность: повтор с тем же clientId возвращает уже созданное сообщение

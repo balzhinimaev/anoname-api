@@ -20,6 +20,8 @@ export interface ServerToClientEvents {
       photos?: string[];
       isPremium: boolean;
       chatId: string;
+      // Принимает ли собеседник голосовые сообщения (privacy-настройка)
+      acceptsVoice?: boolean;
       // Грубое расстояние (км, ступенчатое округление) — только если оба делились гео
       distanceKm?: number;
     };
@@ -109,6 +111,7 @@ export interface ServerToClientEvents {
       photos?: string[];
       isPremium?: boolean;
       chatId: string;
+      acceptsVoice?: boolean;
       distanceKm?: number;
     }
   }) => void;

@@ -56,6 +56,8 @@ export interface IUser extends Document {
       /** Максимальный возраст */
       max: number;
     };
+    /** Приватность: принимать ли голосовые сообщения (default true) */
+    acceptVoice?: boolean;
   };
   /** Возраст пользователя */
   age?: number;
@@ -158,7 +160,8 @@ const UserSchema: Schema = new Schema({
     ageRange: {
       min: { type: Number, min: 18 },
       max: { type: Number, max: 100 }
-    }
+    },
+    acceptVoice: { type: Boolean, default: true }
   },
   age: { type: Number, min: 18 },
   photos: [{ type: String }],

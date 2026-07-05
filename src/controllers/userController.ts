@@ -193,10 +193,12 @@ export const updatePreferences = async (req: Request, res: Response): Promise<vo
   try {
     const { telegramId } = req.params;
     // Строгий allowlist — НЕ пишем сырой req.body (иначе schema-pollution / раздувание документа).
+    // Dot-notation: обновляем только присланные поля, не затирая остальные настройки
+    // (раньше $set: {preferences} перезаписывал объект целиком).
     const body = (req.body || {}) as Record<string, any>;
-    const preferences: { gender?: string; ageRange?: { min?: number; max?: number } } = {};
+    const set: Record<string, unknown> = {};
     if (['male', 'female', 'any'].includes(body.gender)) {
-      preferences.gender = body.gender;
+      set['preferences.gender'] = body.gender;
     }
     if (body.ageRange && typeof body.ageRange === 'object') {
       const min = Number(body.ageRange.min);
@@ -204,12 +206,16 @@ export const updatePreferences = async (req: Request, res: Response): Promise<vo
       const range: { min?: number; max?: number } = {};
       if (Number.isFinite(min)) range.min = Math.max(18, Math.min(100, Math.floor(min)));
       if (Number.isFinite(max)) range.max = Math.max(18, Math.min(100, Math.floor(max)));
-      if (range.min !== undefined || range.max !== undefined) preferences.ageRange = range;
+      if (range.min !== undefined || range.max !== undefined) set['preferences.ageRange'] = range;
+    }
+    // Приватность: приём голосовых сообщений
+    if (typeof body.acceptVoice === 'boolean') {
+      set['preferences.acceptVoice'] = body.acceptVoice;
     }
 
     const user = await User.findOneAndUpdate(
       { telegramId },
-      { $set: { preferences } },
+      Object.keys(set).length ? { $set: set } : {},
       { new: true }
     );
 
