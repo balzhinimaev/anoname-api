@@ -22,6 +22,8 @@ export interface ServerToClientEvents {
       chatId: string;
       // Принимает ли собеседник голосовые сообщения (privacy-настройка)
       acceptsVoice?: boolean;
+      // Принимает ли собеседник приглашения в мини-игры (privacy-настройка)
+      acceptsGames?: boolean;
       // Грубое расстояние (км, ступенчатое округление) — только если оба делились гео
       distanceKm?: number;
     };
@@ -112,6 +114,7 @@ export interface ServerToClientEvents {
       isPremium?: boolean;
       chatId: string;
       acceptsVoice?: boolean;
+      acceptsGames?: boolean;
       distanceKm?: number;
     }
   }) => void;

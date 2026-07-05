@@ -635,8 +635,8 @@ export class SearchService {
 
           // Получаем дополнительную информацию о пользователях для уведомлений
           const [user1Data, user2Data] = await Promise.all([
-            User.findById(search1.userId).select('rating username firstName lastName profilePhoto photos subscription preferences.acceptVoice').lean(),
-            User.findById(search2.userId).select('rating username firstName lastName profilePhoto photos subscription preferences.acceptVoice').lean()
+            User.findById(search1.userId).select('rating username firstName lastName profilePhoto photos subscription preferences.acceptVoice preferences.acceptGames').lean(),
+            User.findById(search2.userId).select('rating username firstName lastName profilePhoto photos subscription preferences.acceptVoice preferences.acceptGames').lean()
           ]);
 
           // Грубое расстояние между собеседниками (если оба делились геопозицией).
@@ -663,6 +663,7 @@ export class SearchService {
               isPremium: !!(user2Data?.subscription?.isActive && user2Data?.subscription?.type && user2Data?.subscription?.type !== 'basic'),
               chatId: createdChat._id.toString(),
               acceptsVoice: (user2Data as any)?.preferences?.acceptVoice !== false,
+              acceptsGames: (user2Data as any)?.preferences?.acceptGames !== false,
               ...(distanceKm !== null ? { distanceKm } : {})
             }
           });
@@ -677,6 +678,7 @@ export class SearchService {
               isPremium: !!(user1Data?.subscription?.isActive && user1Data?.subscription?.type && user1Data?.subscription?.type !== 'basic'),
               chatId: createdChat._id.toString(),
               acceptsVoice: (user1Data as any)?.preferences?.acceptVoice !== false,
+              acceptsGames: (user1Data as any)?.preferences?.acceptGames !== false,
               ...(distanceKm !== null ? { distanceKm } : {})
             }
           });

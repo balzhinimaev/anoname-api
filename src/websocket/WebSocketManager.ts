@@ -207,7 +207,7 @@ export class WebSocketManager {
         // Берем из User: telegramId, gender, age, rating, username/имя/фото, премиум статус
         try {
           // PII: НЕ раскрываем telegramId/@username/фамилию партнёра при гидратации сессии.
-          const other = await User.findById(otherParticipant).select('gender age rating firstName profilePhoto photos subscription preferences.acceptVoice');
+          const other = await User.findById(otherParticipant).select('gender age rating firstName profilePhoto photos subscription preferences.acceptVoice preferences.acceptGames');
           if (other) {
             matchedUser = {
               gender: other.gender as any,
@@ -219,6 +219,7 @@ export class WebSocketManager {
               isPremium: !!(other.subscription?.isActive && other.subscription?.type && other.subscription?.type !== 'basic'),
               chatId,
               acceptsVoice: other.preferences?.acceptVoice !== false,
+              acceptsGames: other.preferences?.acceptGames !== false,
               // Грубое расстояние из чата — бейдж «📍 ~N км» переживает реконнект
               ...(typeof (activeChat as { distanceKm?: number }).distanceKm === 'number'
                 ? { distanceKm: (activeChat as { distanceKm?: number }).distanceKm }
@@ -689,6 +690,18 @@ export class WebSocketManager {
             socket.emit('error', { message: 'Forbidden' }); return;
           }
           const players = chat.participants.map((p) => p.toString()) as [string, string];
+          // Приватность получателя: запрет на приглашения в игры (кнопка у
+          // отправителя скрыта по acceptsGames, но сервер — источник истины)
+          const inviteeId = players.find((p) => p !== userId);
+          if (inviteeId) {
+            const invitee = await User.findById(inviteeId).select('preferences.acceptGames').lean();
+            if ((invitee as { preferences?: { acceptGames?: boolean } } | null)?.preferences?.acceptGames === false) {
+              socket.emit('error', { message: 'Собеседник отключил приглашения в игры' });
+              // Сбрасываем «Ждём ответа…» у приглашающего
+              this.sendToUser(userId, 'game:end', { reason: 'declined' });
+              return;
+            }
+          }
           this.dispatchGameEvents(gameManager.invite(chatId, userId, gameId, players));
         } catch (e) {
           wsLogger.error('game_invite', userId, e as Error);

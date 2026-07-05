@@ -212,6 +212,10 @@ export const updatePreferences = async (req: Request, res: Response): Promise<vo
     if (typeof body.acceptVoice === 'boolean') {
       set['preferences.acceptVoice'] = body.acceptVoice;
     }
+    // Приватность: приглашения в мини-игры
+    if (typeof body.acceptGames === 'boolean') {
+      set['preferences.acceptGames'] = body.acceptGames;
+    }
 
     const user = await User.findOneAndUpdate(
       { telegramId },
