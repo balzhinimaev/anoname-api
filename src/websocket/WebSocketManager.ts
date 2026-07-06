@@ -505,8 +505,10 @@ export class WebSocketManager {
         // допустим только формат с корректным chatId
         const ok = typeof data?.chatId === 'string' && /^[a-f\d]{24}$/i.test(data.chatId);
         if (!ok) return;
-        wsLogger.event('chat_start_typing', userId, socket.id, { chatId: data.chatId });
-        this.handleChatStartTyping(socket, data.chatId);
+        // mode: 'voice' → собеседник видит «записывает голосовое…» (иначе обычное «печатает»)
+        const mode = (data as { mode?: string })?.mode === 'voice' ? 'voice' as const : undefined;
+        wsLogger.event('chat_start_typing', userId, socket.id, { chatId: data.chatId, mode });
+        this.handleChatStartTyping(socket, data.chatId, mode);
       });
 
       socket.on('chat:stop_typing', (data) => {
@@ -1289,17 +1291,19 @@ export class WebSocketManager {
     }
   }
 
-  private async handleChatStartTyping(socket: TypedSocket, chatId: string) {
+  private async handleChatStartTyping(socket: TypedSocket, chatId: string, mode?: 'voice') {
     const isObjectId = (id: string) => /^[a-f\d]{24}$/i.test(id);
     if (!chatId || !isObjectId(chatId)) {
       socket.emit('error', { message: 'Invalid chatId' });
       return;
     }
     const userId = socket.data.user._id.toString();
+    // Запись голосового — тоже «активность»: idle-таймер Купидона ставится на паузу
     this.noteTypingStart(chatId, userId);
     socket.to(`chat:${chatId}`).emit('chat:start_typing', {
       chatId,
       userId: userId,
+      ...(mode ? { mode } : {}),
     });
   }
 

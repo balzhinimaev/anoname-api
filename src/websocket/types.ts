@@ -58,6 +58,8 @@ export interface ServerToClientEvents {
   'chat:start_typing': (data: {
     chatId: string;
     userId: string;
+    // 'voice' → собеседник записывает голосовое (иначе печатает текст)
+    mode?: 'voice';
   }) => void;
   'chat:stop_typing': (data: {
     chatId: string;
@@ -176,7 +178,7 @@ export interface ClientToServerEvents {
     content: string;
     replyTo?: string;  // ID сообщения, на которое отвечаем
   }) => void;
-  'chat:start_typing': (data: { chatId: string }) => void;
+  'chat:start_typing': (data: { chatId: string; mode?: 'voice' }) => void;
   'chat:stop_typing': (data: { chatId: string }) => void;
   // Запросить у AI тему/вопрос для оживления диалога (айсбрейкер)
   'chat:suggest_topic': (data: { chatId: string }) => void;
