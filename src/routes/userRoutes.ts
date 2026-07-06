@@ -296,8 +296,8 @@ router.put(
 	'/:telegramId/preferences',
 	[
 		body('gender').optional().isIn(['male', 'female', 'any']),
-		body('ageRange.min').optional().isInt({ min: 18 }),
-		body('ageRange.max').optional().isInt({ max: 100 }),
+		body('ageRange.min').optional().isInt({ min: 18, max: 100 }),
+		body('ageRange.max').optional().isInt({ min: 18, max: 100 }),
 	],
 	validateRequest as express.RequestHandler,
 	ensureOwnerOrAdminByParam as express.RequestHandler,

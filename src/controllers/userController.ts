@@ -1,5 +1,7 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import User from '../models/User';
+import logger from '../utils/logger';
 import { BlockService } from '../services/BlockService';
 import { ReferralService } from '../services/ReferralService';
 import { MonetizationService } from "../services/MonetizationService";
@@ -208,6 +210,10 @@ export const updatePreferences = async (req: Request, res: Response): Promise<vo
       const range: { min?: number; max?: number } = {};
       if (Number.isFinite(min)) range.min = Math.max(18, Math.min(100, Math.floor(min)));
       if (Number.isFinite(max)) range.max = Math.max(18, Math.min(100, Math.floor(max)));
+      // Инверсный диапазон (min > max) нормализуем свапом — грязные данные не пишем
+      if (range.min !== undefined && range.max !== undefined && range.min > range.max) {
+        [range.min, range.max] = [range.max, range.min];
+      }
       if (range.min !== undefined || range.max !== undefined) set['preferences.ageRange'] = range;
     }
     // Приватность: приём голосовых сообщений
@@ -242,11 +248,56 @@ export const updatePreferences = async (req: Request, res: Response): Promise<vo
       return;
     }
 
+    // Смена privacy-настроек, влияющих на кнопки чата, пушится в активный чат:
+    // иначе собеседник до реконнекта видел старые кнопки (худший случай —
+    // записал 60с голосового и получил 403). showDistance/cupidHints не пушим:
+    // первое фиксируется в момент матча, второе не влияет на UI.
+    const uiAffecting = ['acceptVoice', 'acceptGames', 'acceptCupid'].some(
+      (k) => typeof body[k] === 'boolean'
+    );
+    if (uiAffecting) {
+      pushChatPrefs(String(user._id)).catch((e) =>
+        logger.warn('push_chat_prefs_failed', { error: (e as Error).message })
+      );
+    }
+
     res.status(200).json(user);
   } catch (error) {
     res.status(500).json({ error: 'Ошибка при обновлении предпочтений' });
   }
 };
+
+/**
+ * Рассылает участникам активного чата юзера свежие privacy-признаки
+ * (каждому — признаки ЕГО собеседника; cupidAvailable общий для чата).
+ */
+async function pushChatPrefs(userId: string): Promise<void> {
+  const { wsManager } = await import('../server');
+  const Chat = (await import('../models/Chat')).default;
+  const chat = await Chat.findOne({
+    participants: new mongoose.Types.ObjectId(userId),
+    isActive: true,
+  }).select('participants');
+  if (!chat) return;
+  const ids = chat.participants.map((p) => p.toString());
+  const users = await User.find({ _id: { $in: chat.participants } })
+    .select('preferences.acceptVoice preferences.acceptGames preferences.acceptCupid')
+    .lean();
+  const prefOf = (id: string) => users.find((u) => String(u._id) === id)?.preferences || {};
+  const cupidAvailable = ids.every((id) => prefOf(id).acceptCupid !== false);
+  const chatId = chat._id.toString();
+  for (const id of ids) {
+    const other = ids.find((x) => x !== id);
+    if (!other) continue;
+    const op = prefOf(other);
+    wsManager.sendToUser(id, 'chat:partner_prefs', {
+      chatId,
+      acceptsVoice: op.acceptVoice !== false,
+      acceptsGames: op.acceptGames !== false,
+      cupidAvailable,
+    });
+  }
+}
 
 const MAX_PHOTOS = 10;
 const isHttpsUrl = (u: unknown): u is string => {

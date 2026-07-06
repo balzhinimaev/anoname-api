@@ -452,3 +452,57 @@ describe('match-quiz', () => {
     jest.useRealTimers();
   });
 });
+
+
+// ── Фиксы повторного аудита ─────────────────────────────────────────────────
+describe('фиксы аудита: приглашения, ресинк, подсказка', () => {
+  it('инициатор может отменить своё pending-приглашение (взаимные invite)', () => {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    // встречное приглашение B перетирает сессию → инициатор теперь B
+    gm.invite(CHAT, B, 'match-quiz', PLAYERS);
+    // B (инициатор перетёршей сессии) жмёт «Нет» на приглашение A — раньше глоталось
+    const out = gm.respond(CHAT, B, false);
+    const ends = out.filter((e) => e.event === 'game:end');
+    expect(ends.map((e) => e.toUserId).sort()).toEqual([A, B]);
+    expect((ends[0].data as any).reason).toBe('declined');
+    // сессия снята — повторный respond пуст
+    expect(gm.respond(CHAT, A, true)).toHaveLength(0);
+  });
+
+  it('инициатор НЕ может принять сам себя', () => {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    expect(gm.respond(CHAT, A, true)).toHaveLength(0);
+    // сессия жива — B может принять
+    expect(gm.respond(CHAT, B, true).some((e) => e.event === 'game:choose')).toBe(true);
+  });
+
+  it('ресинк квиза отдаёт мой ответ и статус партнёра', () => {
+    const gm = new GameManager();
+    gm.invite(CHAT, A, 'match-quiz', PLAYERS);
+    gm.respond(CHAT, B, true);
+    gm.event(CHAT, A, 'answer', { index: 1 });
+    const syncA = gm.syncEvents(CHAT, A)[0].data as any;
+    const syncB = gm.syncEvents(CHAT, B)[0].data as any;
+    expect(syncA.myAnswer).toBe(1);
+    expect(syncA.partnerAnswered).toBe(false);
+    expect(syncB.myAnswer).toBeUndefined();
+    expect(syncB.partnerAnswered).toBe(true);
+  });
+
+  it('подсказка-буква уходит только угадывающему', () => {
+    jest.useFakeTimers();
+    const gm = new GameManager(5000);
+    const dispatched: OutEvent[][] = [];
+    gm.setDispatcher((evts) => dispatched.push(evts));
+    gm.invite(CHAT, A, 'draw-guess', PLAYERS);
+    gm.respond(CHAT, B, true);
+    gm.event(CHAT, A, 'pick', { index: 0 }); // A рисует
+    jest.advanceTimersByTime(2500); // середина раунда
+    const hints = dispatched.flat().filter((e) => (e.data as any).type === 'hint');
+    expect(hints).toHaveLength(1);
+    expect(hints[0].toUserId).toBe(B); // только угадывающему
+    jest.useRealTimers();
+  });
+});

@@ -10,7 +10,7 @@
 
 export type OutEvent =
   | { toUserId: string; event: 'game:invite'; data: { gameId: string; by: string; title: string } }
-  | { toUserId: string; event: 'game:start'; data: { gameId: string; role: GameRole; word?: string; mask?: string; question?: { text: string; options: string[] }; myScore: number; opponentScore: number; round: number; roundSeconds: number; targetScore: number } }
+  | { toUserId: string; event: 'game:start'; data: { gameId: string; role: GameRole; word?: string; mask?: string; question?: { text: string; options: string[] }; myAnswer?: number; partnerAnswered?: boolean; myScore: number; opponentScore: number; round: number; roundSeconds: number; targetScore: number } }
   | { toUserId: string; event: 'game:choose'; data: { role: GameRole; words?: string[]; chooseSeconds: number; round: number; myScore: number; opponentScore: number; targetScore: number } }
   | { toUserId: string; event: 'game:event'; data: { type: string; payload?: any } }
   | { toUserId: string; event: 'game:end'; data: { reason?: string; youWon?: boolean; myScore?: number; opponentScore?: number } };
@@ -56,8 +56,9 @@ interface GameDefinition {
   roundSecondsOverride?: number;
   /** Подготовка данных нового раунда для игр без фазы выбора (например, следующий вопрос). */
   prepareRound?(state: GameState): void;
-  /** Событие середины раунда (например, подсказка-буква). null → ничего не слать. */
-  onHalfTime?(state: GameState): Array<{ type: string; payload?: any }> | null;
+  /** Событие середины раунда (например, подсказка-буква). null → ничего не слать.
+   *  to: 'guessers' → всем, кроме текущего drawerId (по умолчанию 'both'). */
+  onHalfTime?(state: GameState): Array<{ to?: 'both' | 'guessers'; type: string; payload?: any }> | null;
   /** Начальное состояние новой игры (starter ходит первым «рисующим»). */
   init(players: [string, string], starterId: string): GameState;
   /** Роль игрока + приватные данные для game:start (рисующему — слово, угадывающему — маску, в квизе — вопрос). */
@@ -180,7 +181,7 @@ const drawGuess: GameDefinition = {
       .join(' ')
       .trim();
     state.hintMask = mask;
-    return [{ type: 'hint', payload: { mask } }];
+    return [{ to: 'guessers', type: 'hint', payload: { mask } }];
   },
 
   pickCandidates(count, exclude) {
@@ -455,7 +456,15 @@ export class GameManager {
   /** Ответ на приглашение. accept=false → завершение. accept=true → старт (game:start обоим). */
   respond(chatId: string, userId: string, accept: boolean): OutEvent[] {
     const s = this.sessions.get(chatId);
-    if (!s || s.status !== 'pending' || userId === s.inviterId) return [];
+    if (!s || s.status !== 'pending') return [];
+    if (userId === s.inviterId) {
+      // Инициатор не может принять сам себя, но МОЖЕТ отменить сессию.
+      // Важно при взаимных приглашениях: встречный invite перетирает pending,
+      // и «Нет» перетёртого инициатора раньше глоталось — экран приглашения висел.
+      if (accept) return [];
+      this.clearSession(chatId);
+      return s.players.map((p) => ({ toUserId: p, event: 'game:end' as const, data: { reason: 'declined' } }));
+    }
     if (!accept) {
       this.clearSession(chatId);
       return s.players.map((p) => ({ toUserId: p, event: 'game:end' as const, data: { reason: 'declined' } }));
@@ -604,7 +613,10 @@ export class GameManager {
     if (!evs || evs.length === 0) return;
     const out: OutEvent[] = [];
     for (const e of evs) {
-      for (const t of s.players) {
+      const targets = e.to === 'guessers'
+        ? s.players.filter((p) => p !== s.state!.drawerId)
+        : s.players;
+      for (const t of targets) {
         out.push({ toUserId: t, event: 'game:event', data: { type: e.type, payload: e.payload } });
       }
     }
@@ -666,6 +678,12 @@ export class GameManager {
 
     const info = s.def.startInfo(st, userId);
     const remainingMs = s.roundEndsAt ? Math.max(0, s.roundEndsAt - Date.now()) : this.roundMsFor(s);
+    // Квиз: переподключившийся должен видеть свой уже данный ответ (кнопки
+    // залочены на верном варианте) и знать, ответил ли партнёр
+    const quizSync = st.quiz ? {
+      myAnswer: st.quiz.answers[userId],
+      partnerAnswered: st.quiz.answers[other] !== undefined,
+    } : {};
     return [{
       toUserId: userId,
       event: 'game:start',
@@ -675,6 +693,7 @@ export class GameManager {
         word: info.word,
         mask: info.mask,
         question: info.question,
+        ...quizSync,
         myScore: st.scores[userId] || 0,
         opponentScore: st.scores[other] || 0,
         round: st.round,

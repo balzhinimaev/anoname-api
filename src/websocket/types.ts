@@ -91,6 +91,14 @@ export interface ServerToClientEvents {
     reason?: 'tma_closed' | 'network' | 'unknown';
   }) => void;
 
+  // Свежие privacy-признаки собеседника (пуш при смене настроек в активном чате)
+  'chat:partner_prefs': (data: {
+    chatId: string;
+    acceptsVoice: boolean;
+    acceptsGames: boolean;
+    cupidAvailable: boolean;
+  }) => void;
+
   // Подтверждение отправки жалобы
   'report:submitted': (data: { chatId: string; reportId?: string }) => void;
 
