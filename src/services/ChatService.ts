@@ -6,6 +6,7 @@ import { wsLogger } from '../utils/logger';
 import { SearchService } from './SearchService';
 import { BlockService } from './BlockService';
 import { gameManager } from './GameService';
+import { GamificationService } from './GamificationService';
 
 export class ChatService {
   static async sendMessage(
@@ -84,6 +85,9 @@ export class ChatService {
 
     // Живое сообщение перезапускает таймер тишины для авто-айсбрейкера
     wsManager.noteChatMessage(chatId, userId);
+
+    // Геймификация: XP за общение (внутри — анти-спам кап)
+    GamificationService.award(userId, 'message').catch(() => {});
 
     return messageWithSender;
   }

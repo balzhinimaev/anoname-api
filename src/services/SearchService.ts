@@ -9,6 +9,7 @@ import { MonetizationService } from './MonetizationService';
 import { BlockService } from './BlockService';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { ReferralService } from './ReferralService';
+import { GamificationService } from './GamificationService';
 
 export interface SearchCriteria {
   gender: 'male' | 'female';
@@ -627,6 +628,9 @@ export class SearchService {
 
         // Транзакция успешно завершена
         if (createdChat) {
+          // Геймификация: матч обоим
+          GamificationService.award(String(search1.userId), 'match').catch(() => {});
+          GamificationService.award(String(search2.userId), 'match').catch(() => {});
           wsLogger.info('match_created', 'Создан новый матч (tx)', {
             chatId: createdChat._id.toString(),
             search1Id: search1._id.toString(),

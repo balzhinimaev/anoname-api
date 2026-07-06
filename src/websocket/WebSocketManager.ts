@@ -116,6 +116,18 @@ export class WebSocketManager {
     this.startZombieSweep();
     // Асинхронные игровые события (истечение таймера раунда) — тем же адресным каналом.
     gameManager.setDispatcher((events) => this.dispatchGameEvents(events));
+    // Геймификация: XP/ачивки за доигранные партии
+    gameManager.setFinishListener(({ players, winnerId, gameId, quizMatches }) => {
+      import('../services/GamificationService').then(({ GamificationService }) => {
+        for (const p of players) {
+          GamificationService.award(p, 'game_played').catch(() => {});
+          if (gameId === 'match-quiz' && (quizMatches || 0) >= 8) {
+            GamificationService.award(p, 'quiz_soulmates').catch(() => {});
+          }
+        }
+        if (winnerId) GamificationService.award(winnerId, 'game_won').catch(() => {});
+      }).catch(() => {});
+    });
   }
 
   /**

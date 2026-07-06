@@ -4,6 +4,7 @@ import Chat from '../models/Chat';
 import User from '../models/User';
 import { wsManager } from '../server';
 import { wsLogger } from '../utils/logger';
+import { GamificationService } from './GamificationService';
 
 export class RatingService {
   /**
@@ -65,6 +66,11 @@ export class RatingService {
 
     // Обновляем средний рейтинг оцененного пользователя
     await this.updateUserRating(ratedUserId.toString());
+
+    // Геймификация: полученная пятёрка — XP и вехи «любимца»
+    if (score === 5) {
+      GamificationService.award(ratedUserId.toString(), 'five_star').catch(() => {});
+    }
 
     // Отправляем уведомление о новой оценке
     wsManager.sendToUser(ratedUserId.toString(), 'chat:rated', {

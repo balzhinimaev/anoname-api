@@ -67,6 +67,18 @@ export interface IUser extends Document {
     /** Купидон полностью (включая кнопку 💡): false = заблокирован (default true) */
     acceptCupid?: boolean;
   };
+  /** Геймификация: XP, счётчики вех, разблокированные ачивки */
+  gamification?: {
+    xp?: number;
+    messages?: number;
+    matches?: number;
+    voices?: number;
+    gamesPlayed?: number;
+    gamesWon?: number;
+    fiveStars?: number;
+    referrals?: number;
+    achievements?: string[];
+  };
   /** Возраст пользователя */
   age?: number;
   /** Массив URL фотографий пользователя */
@@ -174,6 +186,17 @@ const UserSchema: Schema = new Schema({
     showDistance: { type: Boolean, default: true },
     cupidHints: { type: Boolean, default: true },
     acceptCupid: { type: Boolean, default: true }
+  },
+  gamification: {
+    xp: { type: Number, default: 0 },
+    messages: { type: Number, default: 0 },
+    matches: { type: Number, default: 0 },
+    voices: { type: Number, default: 0 },
+    gamesPlayed: { type: Number, default: 0 },
+    gamesWon: { type: Number, default: 0 },
+    fiveStars: { type: Number, default: 0 },
+    referrals: { type: Number, default: 0 },
+    achievements: { type: [String], default: [] }
   },
   age: { type: Number, min: 18 },
   photos: [{ type: String }],

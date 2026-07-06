@@ -429,6 +429,16 @@ export class GameManager {
   private sessions = new Map<string, Session>(); // chatId -> session
   /** Рассылка событий вне запроса (истечение таймера раунда). Регистрирует WebSocketManager. */
   private dispatcher: ((events: OutEvent[]) => void) | null = null;
+  /** Уведомление о завершённой партии (геймификация). Регистрирует WebSocketManager. */
+  private finishListener:
+    | ((info: { players: [string, string]; winnerId?: string; gameId: string; quizMatches?: number }) => void)
+    | null = null;
+
+  setFinishListener(
+    fn: (info: { players: [string, string]; winnerId?: string; gameId: string; quizMatches?: number }) => void
+  ): void {
+    this.finishListener = fn;
+  }
 
   constructor(private roundMs: number = ROUND_SECONDS * 1000) {}
 
@@ -576,6 +586,14 @@ export class GameManager {
    *  Без winnerId — кооперативный финал (youWon не отправляется). */
   private finishEvents(s: Session, winnerId?: string): OutEvent[] {
     const st = s.state!;
+    try {
+      this.finishListener?.({
+        players: s.players,
+        winnerId,
+        gameId: st.gameId,
+        quizMatches: st.quiz?.matches,
+      });
+    } catch { /* геймификация не должна ломать игру */ }
     return s.players.map((p) => {
       const other = s.players.find((x) => x !== p)!;
       return {

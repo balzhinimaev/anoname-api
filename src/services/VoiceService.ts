@@ -7,6 +7,7 @@ import Message, { IMessage } from '../models/Message';
 import User from '../models/User';
 import Report from '../models/Report';
 import { BlockService } from './BlockService';
+import { GamificationService } from './GamificationService';
 import { wsManager } from '../server';
 import config from '../config';
 import { wsLogger } from '../utils/logger';
@@ -165,6 +166,8 @@ class VoiceServiceImpl {
       wsManager.io.to(`chat:${chatId}`).emit('chat:message', { chatId, message: populated });
       // Голосовое — живое сообщение: перезапускает таймер тишины Купидона
       wsManager.noteChatMessage(chatId, userId);
+      // Геймификация: XP за голосовое (серверный rate-limit уже отсёк спам)
+      GamificationService.award(userId, 'voice').catch(() => {});
       wsLogger.info('voice_sent', `Voice message ${messageId} in chat ${chatId}`, {
         chatId, userId, duration, size, voiceChanged,
       });

@@ -111,6 +111,9 @@ export class ReferralService {
       if (!u?.referredBy) return;
       // Здесь можно начислить валюту/подписку/бусты
       await User.findByIdAndUpdate(u.referredBy, { $inc: { 'referralStats.rewardedTotal': 1 } });
+      // Геймификация: приглашённый дошёл до квалификации
+      const { GamificationService } = await import('./GamificationService');
+      GamificationService.award(String(u.referredBy), 'referral').catch(() => {});
       await AnalyticsEvent.create({ name: 'referral_rewarded', props: { referrerId: String(u.referredBy), userId } } as any);
       metricsCollector.referralRewarded();
       logger.info('referral_rewarded_success', {

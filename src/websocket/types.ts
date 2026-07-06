@@ -142,6 +142,10 @@ export interface ServerToClientEvents {
     status: 'accepted' | 'declined' | 'blocked';
   }) => void;
 
+  // Геймификация: разблокирована ачивка / новый уровень
+  'user:achievement': (data: { id: string }) => void;
+  'user:level_up': (data: { level: number; xp: number }) => void;
+
   // Блокировки
   'user:blocked': (data: { userId: string }) => void;
   'user:unblocked': (data: { userId: string }) => void;
