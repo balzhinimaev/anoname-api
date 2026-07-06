@@ -102,7 +102,7 @@ export const createOrUpdateUser = async (req: Request, res: Response): Promise<v
       { telegramId },
       { $set: { ...update, telegramId } },
       { new: true, upsert: true }
-    );
+    ).select('-passwordHash');
     // Гарантируем реферальный код, если его нет
     try { if (user?._id) await ReferralService.ensureReferralCode(user._id.toString()); } catch {}
     res.status(200).json(user);
@@ -114,7 +114,8 @@ export const createOrUpdateUser = async (req: Request, res: Response): Promise<v
 export const getMe = async (req: Request, res: Response): Promise<void> => {
   try {
     if (!req.user?.userId) { res.status(401).json({ error: 'Не авторизован' }); return; }
-    const user = await User.findById(req.user.userId);
+    // Никогда не отдаём хэш пароля в браузер (память/сеть/devtools; XSS → offline-подбор)
+    const user = await User.findById(req.user.userId).select('-passwordHash');
     if (!user) { res.status(404).json({ error: 'Пользователь не найден' }); return; }
     res.status(200).json(user);
   } catch (error) {
@@ -131,7 +132,8 @@ export const getUser = async (req: Request, res: Response): Promise<void> => {
     const query = { telegramId } as any;
 
     const user = isOwner || isAdmin
-      ? await User.findOne(query)
+      // -passwordHash: даже владельцу/админу хэш в браузере не нужен
+      ? await User.findOne(query).select('-passwordHash')
       : await User.findOne(query).select(PUBLIC_USER_PROJECTION).lean();
 
     if (!user) {
@@ -233,7 +235,7 @@ export const updatePreferences = async (req: Request, res: Response): Promise<vo
       { telegramId },
       Object.keys(set).length ? { $set: set } : {},
       { new: true }
-    );
+    ).select('-passwordHash');
 
     if (!user) {
       res.status(404).json({ error: 'Пользователь не найден' });
