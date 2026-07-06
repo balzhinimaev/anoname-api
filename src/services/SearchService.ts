@@ -635,13 +635,17 @@ export class SearchService {
 
           // Получаем дополнительную информацию о пользователях для уведомлений
           const [user1Data, user2Data] = await Promise.all([
-            User.findById(search1.userId).select('rating username firstName lastName profilePhoto photos subscription preferences.acceptVoice preferences.acceptGames').lean(),
-            User.findById(search2.userId).select('rating username firstName lastName profilePhoto photos subscription preferences.acceptVoice preferences.acceptGames').lean()
+            User.findById(search1.userId).select('rating username firstName lastName profilePhoto photos subscription preferences').lean(),
+            User.findById(search2.userId).select('rating username firstName lastName profilePhoto photos subscription preferences').lean()
           ]);
 
-          // Грубое расстояние между собеседниками (если оба делились геопозицией).
+          // Грубое расстояние между собеседниками (если оба делились геопозицией
+          // И оба не скрыли расстояние в настройках приватности).
           // Число огрублено ступенями — точную позицию по нему не восстановить.
-          const distanceKm = this.coarseDistanceKm(search1, search2);
+          const bothShowDistance =
+            (user1Data as any)?.preferences?.showDistance !== false &&
+            (user2Data as any)?.preferences?.showDistance !== false;
+          const distanceKm = bothShowDistance ? this.coarseDistanceKm(search1, search2) : null;
           if (distanceKm !== null) {
             // Персистим в чат: бейдж расстояния должен переживать реконнект
             Chat.updateOne({ _id: createdChat._id }, { $set: { distanceKm } }).catch((e) => {

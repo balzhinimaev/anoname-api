@@ -216,6 +216,14 @@ export const updatePreferences = async (req: Request, res: Response): Promise<vo
     if (typeof body.acceptGames === 'boolean') {
       set['preferences.acceptGames'] = body.acceptGames;
     }
+    // Приватность: показывать ли расстояние собеседнику
+    if (typeof body.showDistance === 'boolean') {
+      set['preferences.showDistance'] = body.showDistance;
+    }
+    // Подсказки Купидона (авто-айсбрейкеры)
+    if (typeof body.cupidHints === 'boolean') {
+      set['preferences.cupidHints'] = body.cupidHints;
+    }
 
     const user = await User.findOneAndUpdate(
       { telegramId },
