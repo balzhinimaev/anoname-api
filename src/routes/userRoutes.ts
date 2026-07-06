@@ -82,12 +82,12 @@ export const router = express.Router();
 router.post(
 	'/',
 	[
-		body('username').optional(),
-		body('firstName').optional(),
-		body('lastName').optional(),
-		body('bio').optional(),
+		body('username').optional().isString().trim().isLength({ max: 50 }),
+		body('firstName').optional().isString().trim().isLength({ min: 1, max: 50 }),
+		body('lastName').optional().isString().trim().isLength({ max: 50 }),
+		body('bio').optional().isString().trim().isLength({ max: 300 }),
 		body('gender').optional().isIn(['male', 'female', 'other']),
-		body('age').optional().isInt({ min: 18 }),
+		body('age').optional().isInt({ min: 18, max: 100 }),
 	],
 	validateRequest as express.RequestHandler,
 	userController.createOrUpdateUser as express.RequestHandler
