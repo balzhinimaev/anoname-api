@@ -24,6 +24,8 @@ export interface ServerToClientEvents {
       acceptsVoice?: boolean;
       // Принимает ли собеседник приглашения в мини-игры (privacy-настройка)
       acceptsGames?: boolean;
+      // Доступен ли Купидон в чате (false, если любой из двоих его заблокировал)
+      cupidAvailable?: boolean;
       // Грубое расстояние (км, ступенчатое округление) — только если оба делились гео
       distanceKm?: number;
     };
@@ -117,6 +119,7 @@ export interface ServerToClientEvents {
       chatId: string;
       acceptsVoice?: boolean;
       acceptsGames?: boolean;
+      cupidAvailable?: boolean;
       distanceKm?: number;
     }
   }) => void;

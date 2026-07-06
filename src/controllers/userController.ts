@@ -224,6 +224,10 @@ export const updatePreferences = async (req: Request, res: Response): Promise<vo
     if (typeof body.cupidHints === 'boolean') {
       set['preferences.cupidHints'] = body.cupidHints;
     }
+    // Полная блокировка Купидона (включая кнопку 💡)
+    if (typeof body.acceptCupid === 'boolean') {
+      set['preferences.acceptCupid'] = body.acceptCupid;
+    }
 
     const user = await User.findOneAndUpdate(
       { telegramId },

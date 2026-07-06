@@ -642,6 +642,10 @@ export class SearchService {
           // Грубое расстояние между собеседниками (если оба делились геопозицией
           // И оба не скрыли расстояние в настройках приватности).
           // Число огрублено ступенями — точную позицию по нему не восстановить.
+          // Купидон доступен в чате, только если оба его не заблокировали
+          const cupidAvailable =
+            (user1Data as any)?.preferences?.acceptCupid !== false &&
+            (user2Data as any)?.preferences?.acceptCupid !== false;
           const bothShowDistance =
             (user1Data as any)?.preferences?.showDistance !== false &&
             (user2Data as any)?.preferences?.showDistance !== false;
@@ -668,6 +672,7 @@ export class SearchService {
               chatId: createdChat._id.toString(),
               acceptsVoice: (user2Data as any)?.preferences?.acceptVoice !== false,
               acceptsGames: (user2Data as any)?.preferences?.acceptGames !== false,
+              cupidAvailable,
               ...(distanceKm !== null ? { distanceKm } : {})
             }
           });
@@ -683,6 +688,7 @@ export class SearchService {
               chatId: createdChat._id.toString(),
               acceptsVoice: (user1Data as any)?.preferences?.acceptVoice !== false,
               acceptsGames: (user1Data as any)?.preferences?.acceptGames !== false,
+              cupidAvailable,
               ...(distanceKm !== null ? { distanceKm } : {})
             }
           });

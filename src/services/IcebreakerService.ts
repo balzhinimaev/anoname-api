@@ -73,9 +73,17 @@ class IcebreakerServiceImpl {
       const chat = await Chat.findById(chatId).select('participants isActive');
       if (!chat || !chat.isActive) return false;
 
-      // Авто-подсказки (старт/тишина) — только если ОБА не выключили Купидона
+      // Полная блокировка Купидона (acceptCupid=false у любого участника)
+      // выключает ВСЁ, включая ручную кнопку 💡.
+      const blocked = await User.exists({
+        _id: { $in: chat.participants },
+        'preferences.acceptCupid': false,
+      });
+      if (blocked) return false;
+
+      // Авто-подсказки (старт/тишина) — только если ОБА не выключили их
       // в настройках (генерация использует текст переписки → это приватность).
-      // Ручной запрос кнопкой 💡 работает всегда.
+      // Ручной запрос кнопкой 💡 при этом работает.
       if (kind !== 'manual') {
         const optedOut = await User.exists({
           _id: { $in: chat.participants },

@@ -64,6 +64,8 @@ export interface IUser extends Document {
     showDistance?: boolean;
     /** Подсказки Купидона (авто-айсбрейкеры используют текст переписки; default true) */
     cupidHints?: boolean;
+    /** Купидон полностью (включая кнопку 💡): false = заблокирован (default true) */
+    acceptCupid?: boolean;
   };
   /** Возраст пользователя */
   age?: number;
@@ -170,7 +172,8 @@ const UserSchema: Schema = new Schema({
     acceptVoice: { type: Boolean, default: true },
     acceptGames: { type: Boolean, default: true },
     showDistance: { type: Boolean, default: true },
-    cupidHints: { type: Boolean, default: true }
+    cupidHints: { type: Boolean, default: true },
+    acceptCupid: { type: Boolean, default: true }
   },
   age: { type: Number, min: 18 },
   photos: [{ type: String }],

@@ -207,7 +207,10 @@ export class WebSocketManager {
         // Берем из User: telegramId, gender, age, rating, username/имя/фото, премиум статус
         try {
           // PII: НЕ раскрываем telegramId/@username/фамилию партнёра при гидратации сессии.
-          const other = await User.findById(otherParticipant).select('gender age rating firstName profilePhoto photos subscription preferences.acceptVoice preferences.acceptGames');
+          const [other, me] = await Promise.all([
+            User.findById(otherParticipant).select('gender age rating firstName profilePhoto photos subscription preferences'),
+            User.findById(userId).select('preferences.acceptCupid').lean(),
+          ]);
           if (other) {
             matchedUser = {
               gender: other.gender as any,
@@ -220,6 +223,10 @@ export class WebSocketManager {
               chatId,
               acceptsVoice: other.preferences?.acceptVoice !== false,
               acceptsGames: other.preferences?.acceptGames !== false,
+              // Купидон в чате: блок любого из двоих выключает его для обоих
+              cupidAvailable:
+                other.preferences?.acceptCupid !== false &&
+                (me as { preferences?: { acceptCupid?: boolean } } | null)?.preferences?.acceptCupid !== false,
               // Грубое расстояние из чата — бейдж «📍 ~N км» переживает реконнект
               ...(typeof (activeChat as { distanceKm?: number }).distanceKm === 'number'
                 ? { distanceKm: (activeChat as { distanceKm?: number }).distanceKm }
@@ -1172,6 +1179,16 @@ export class WebSocketManager {
       socket.emit('error', { message: 'Forbidden: not a participant of this chat' });
       return;
     }
+    // Полная блокировка Купидона любым из участников — кнопка не работает
+    const cupidBlocked = await User.exists({
+      _id: { $in: chat.participants },
+      'preferences.acceptCupid': false,
+    });
+    if (cupidBlocked) {
+      socket.emit('error', { message: 'Купидон отключён в этом чате' });
+      return;
+    }
+
     const st = this.getIcebreakerState(chatId);
     if (Date.now() - st.lastManualAt < config.openai.icebreakerManualCooldownMs) {
       socket.emit('error', { message: 'Подсказка уже недавно была — подождите немного 😉' });
