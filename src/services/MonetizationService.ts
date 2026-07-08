@@ -585,13 +585,14 @@ export class MonetizationService {
     const user = await this.ensureSubscriptionUpToDateById(userId);
     if (!user) return null;
 
-    // Лимиты поиска отключены — всегда безлимит.
+    // Реальный часовой лимит: безлимит только у Premium.
+    const q = await this.getSearchQuota(userId);
     return {
-      searchesToday: 0,
-      maxSearches: -1,
-      unlimited: true,
-      remaining: -1,
-      resetsAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      searchesToday: q.premium ? 0 : (q.limit - q.remaining),
+      maxSearches: q.premium ? -1 : q.limit,
+      unlimited: q.premium,
+      remaining: q.premium ? -1 : q.remaining,
+      resetsAt: new Date(Date.now() + (q.resetInMin || 60) * 60 * 1000),
       subscriptionType: user.subscription?.type || 'free'
     };
   }
