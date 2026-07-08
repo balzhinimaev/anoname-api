@@ -1,6 +1,31 @@
 import { Request, Response } from 'express';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import Search from '../models/Search';
+import { SearchAnalyticsService } from '../services/SearchAnalyticsService';
+
+const PERIODS: Record<string, number> = { '24h': 24 * 3600e3, '7d': 7 * 864e5, '30d': 30 * 864e5 };
+
+/** Сквозная аналитика поиска: воронка, тайминги, поведение отмен. */
+export const getSearchReport = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const period = String(req.query.period || '7d');
+    const sinceMs = PERIODS[period] || PERIODS['7d'];
+    const report = await SearchAnalyticsService.computeReport(sinceMs);
+    res.json({ success: true, period, generatedAt: new Date().toISOString(), ...report });
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+};
+
+/** Ручной запуск Telegram-дайджеста аналитики поиска (для проверки/по требованию). */
+export const triggerSearchDigest = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const sent = await SearchAnalyticsService.sendDailyDigest(true);
+    res.json({ success: true, sent });
+  } catch (error) {
+    res.status(500).json({ success: false, error: (error as Error).message });
+  }
+};
 
 function parseDate(input?: string, fallbackDays = 7): Date {
   if (input) {

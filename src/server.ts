@@ -28,6 +28,8 @@ import mongoose from 'mongoose';
 import config from './config';
 import { WebSocketManager } from './websocket/WebSocketManager';
 import { VoiceService } from './services/VoiceService';
+import { SearchAnalyticsService } from './services/SearchAnalyticsService';
+import { AICompanionService } from './services/AICompanionService';
 import prelaunchRouter from './routes/prelaunchRoutes';
 import { router as leadRouter } from './routes/leadRoutes';
 import User from './models/User';
@@ -194,6 +196,19 @@ const setupTokenCleanup = () => {
   }, CLEANUP_INTERVAL);
 };
 
+/** Ежедневный Telegram-дайджест аналитики поиска (в 07:00 UTC = 10:00 МСК). */
+const setupSearchDigest = () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const hourUtc = Number(process.env.SEARCH_DIGEST_HOUR_UTC || 7);
+  const now = new Date();
+  const next = new Date(now);
+  next.setUTCHours(hourUtc, 0, 0, 0);
+  if (next.getTime() <= now.getTime()) next.setTime(next.getTime() + DAY);
+  const run = () => { SearchAnalyticsService.sendDailyDigest().catch(() => {}); };
+  setTimeout(() => { run(); setInterval(run, DAY); }, next.getTime() - now.getTime());
+  logger.info(`[Дайджест] Первый дайджест поиска в ${next.toISOString()}`);
+};
+
 /**
  * Запуск сервера и инициализация всех необходимых компонентов
  * @async
@@ -221,6 +236,8 @@ const startServer = async () => {
     
     // Запуск очистки токенов
     setupTokenCleanup();
+    setupSearchDigest();
+    AICompanionService.warmup().catch(() => {}); // прогрев кэша ИИ-персон (isPersona сразу рабочий)
 
     // Плановая чистка файлов голосовых завершённых чатов (приватность)
     VoiceService.startSweep();

@@ -2,9 +2,19 @@ import express, { Request } from 'express';
 import logger from '../utils/logger';
 import { authMiddleware, requireAdmin } from '../middleware/authMiddleware';
 import AnalyticsEvent from '../models/AnalyticsEvent';
-import { getSummary, getTimeseries, getABConversion, getFunnel, getTimingSeries } from '../controllers/analyticsController';
+import { getSummary, getTimeseries, getABConversion, getFunnel, getTimingSeries, getSearchReport, triggerSearchDigest } from '../controllers/analyticsController';
 
 export const router = express.Router();
+
+// Доступ к отчёту поиска: админ (JWT) ИЛИ статический ключ (для дашборда).
+const ANALYTICS_KEY = process.env.ANALYTICS_ADMIN_TOKEN || '';
+const keyOrAdmin: express.RequestHandler[] = [
+  (req, _res, next) => { if (ANALYTICS_KEY && req.query.key === ANALYTICS_KEY) { (req as any)._keyOk = true; } next(); },
+  (req, res, next) => (req as any)._keyOk ? next() : (authMiddleware as express.RequestHandler)(req, res, next),
+  (req, res, next) => (req as any)._keyOk ? next() : (requireAdmin as express.RequestHandler)(req, res, next),
+];
+router.get('/search', ...keyOrAdmin, getSearchReport as express.RequestHandler);
+router.post('/search/digest', ...keyOrAdmin, triggerSearchDigest as express.RequestHandler);
 
 /**
  * Простой приём событий аналитики от клиента (TMA)

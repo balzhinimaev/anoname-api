@@ -3,7 +3,7 @@ import { Server as HttpServer } from 'http';
 import { socketAuth } from './middleware/auth';
 import { ClientToServerEvents, ServerToClientEvents, SocketData, TypedSocket } from './types';
 import { ChatService } from '../services/ChatService';
-import { SearchService, SearchCriteria } from '../services/SearchService';
+import { SearchService, SearchCriteria, SearchStatsSnapshot } from '../services/SearchService';
 import { wsLogger } from '../utils/logger';
 import { metricsCollector } from '../utils/metrics';
 import { CircuitBreaker } from '../utils/CircuitBreaker';
@@ -18,6 +18,7 @@ import AnalyticsEvent from '../models/AnalyticsEvent';
 import { BlockService } from '../services/BlockService';
 import { gameManager, OutEvent } from '../services/GameService';
 import { IcebreakerService } from '../services/IcebreakerService';
+import { AICompanionService } from '../services/AICompanionService';
 
 // Создаем статическую карту для хранения таймаутов
 const pendingSearchCancellations = new Map<string, NodeJS.Timeout>();
@@ -58,6 +59,9 @@ export class WebSocketManager {
   }> = new Map();
   // Чаты, для которых стартовый айсбрейкер уже отправлен/запущен
   private icebreakerStartSent = new Set<string>();
+  // Таймеры «подключить ИИ-собеседника, если поиск висит без живого матча»
+  private aiMatchTimers: Map<string, NodeJS.Timeout> = new Map();
+  private readonly AI_MATCH_DELAY_MS = Number(process.env.AI_COMPANION_DELAY_MS) || 20_000;
 
   constructor(httpServer: HttpServer) {
     const socketCorsOrigin = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
@@ -139,6 +143,8 @@ export class WebSocketManager {
   private startZombieSweep(): void {
     setInterval(() => {
       this.sweepStaleChats().catch((e) => wsLogger.error('zombie_sweep', 'system', e as Error));
+      // Аналитика: durable-событие для истёкших поисков до их удаления по TTL
+      SearchService.sweepExpiredSearches().catch(() => {});
     }, this.ZOMBIE_SWEEP_MS);
   }
 
@@ -194,6 +200,10 @@ export class WebSocketManager {
   private async emitSessionState(socket: TypedSocket) {
     const userId = socket.data.user._id.toString();
     try {
+      // Реконнект во время поиска: если поиск пережил обрыв и есть ждущий
+      // совместимый собеседник — соединяем сразу (иначе матч «не происходил»).
+      await SearchService.retryMatchForUser(userId).catch(() => false);
+
       const activeChat = await Chat.findOne({ participants: new mongoose.Types.ObjectId(userId), isActive: true });
       if (!activeChat) {
         socket.emit('session:state', {});
@@ -205,7 +215,9 @@ export class WebSocketManager {
       let partnerStatusPayload: any = undefined;
       let matchedUser: any = undefined;
       if (otherParticipant) {
-        const isOtherOnline = this.userSockets.has(otherParticipant);
+        // ИИ-персона всегда «онлайн» (у неё нет сокета) — иначе на реконнекте бот
+        // показывается «оффлайн/переподключается», что нелогично.
+        const isOtherOnline = this.userSockets.has(otherParticipant) || AICompanionService.isPersona(otherParticipant);
         const deadline = pendingChatEndDeadlines.get(chatId);
         partnerStatusPayload = {
           chatId,
@@ -335,7 +347,7 @@ export class WebSocketManager {
         // а мутация возвращённого объекта раньше отравляла общий кэш.
         try {
           const stats = await SearchService.getSearchStats();
-          socket.emit('search:stats', stats);
+          socket.emit('search:stats', SearchService.personalizeStats(stats, userId));
         } catch (error) {
           wsLogger.error('stats_initial', userId, error as Error);
         }
@@ -470,6 +482,10 @@ export class WebSocketManager {
               this.maybeSendStartIcebreaker(chatId, [userId, otherParticipant]).catch((e) =>
                 wsLogger.error('icebreaker_start_on_join', userId, e as Error, { chatId })
               );
+            } else if (AICompanionService.isPersona(otherParticipant)) {
+              // Партнёр — ИИ-персона: всегда «онлайн», чат НЕ завершаем по таймеру.
+              this.disarmChatEndTimer(chatId);
+              this.sendToUser(userId, 'chat:partner_status', { chatId, userId: otherParticipant, status: 'online' });
             } else {
               // Партнёр оффлайн → НЕ снимаем его grace, держим/обновляем таймер на обоих.
               this.armChatEndTimer(chatId, [userId, otherParticipant]);
@@ -868,6 +884,12 @@ export class WebSocketManager {
           serverNow: new Date().toISOString()
         });
         wsLogger.info('chat_end_timer_cleared_on_connect', `Both online for chat ${chatId} after user ${userId} connected`, { userId, chatId });
+      } else if (AICompanionService.isPersona(otherParticipant)) {
+        // Партнёр — ИИ-персона: всегда «онлайн», не завершаем чат и показываем её онлайн.
+        this.disarmChatEndTimer(chatId);
+        this.sendToUser(userId, 'chat:partner_status', {
+          chatId, userId: otherParticipant, status: 'online', serverNow: new Date().toISOString(),
+        });
       } else {
         // Партнёр всё ещё оффлайн → (пере)ставим grace-таймер на ОБОИХ участников и
         // отдаём корректный отсчёт текущему пользователю (раньше тут терялся deadline,
@@ -951,7 +973,8 @@ export class WebSocketManager {
     const timeout = setTimeout(async () => {
       pendingChatEndTimers.delete(chatId);
       pendingChatEndDeadlines.delete(chatId);
-      const offline = participants.filter((p) => !this.userSockets.has(p));
+      // ИИ-персона всегда «онлайн» (у неё нет сокета) — не завершаем чат из-за неё
+      const offline = participants.filter((p) => !this.userSockets.has(p) && !AICompanionService.isPersona(p));
       if (offline.length > 0) {
         try {
           await ChatService.endChat(chatId, offline[0], 'partner_disconnected');
@@ -981,23 +1004,29 @@ export class WebSocketManager {
       }
     }
 
+    // Отключился во время ожидания — снимаем таймер ИИ-собеседника
+    this.clearAiMatch(userId);
+    // #8: чистим rate-bucket отключившегося (иначе Map растёт на каждый userId)
+    this.wsRateBuckets.delete(userId);
+
     // Логика отмены поиска
     SearchService.getUserActiveSearch(userId).then(activeSearch => {
       if (activeSearch && activeSearch.status === 'searching') {
         wsLogger.info('search_disconnect_detected', 'User in search disconnected', { userId, searchId: activeSearch._id?.toString(), reason, duration });
         const searchCancelTimeout = setTimeout(async () => {
+          pendingSearchCancellations.delete(userId); // #13: не оставляем отработавший таймер в Map
           if (!this.userSockets.has(userId)) {
             try {
               const currentSearch = await SearchService.getUserActiveSearch(userId);
               if (currentSearch && currentSearch.status === 'searching') {
-                await SearchService.cancelSearch(userId);
+                await SearchService.cancelSearch(userId, 'disconnect');
                 wsLogger.info('search_auto_cancelled', 'Search automatically cancelled after timeout', { userId, searchId: currentSearch._id?.toString() });
               }
             } catch (error) {
               wsLogger.error('search_auto_cancel_error', userId, error as Error);
             }
           }
-        }, 10000); // Таймаут 10 сек для отмены поиска
+        }, 45000); // Грейс 45 сек: переживаем обрыв/перезагрузку сети, поиск не теряется
         pendingSearchCancellations.set(userId, searchCancelTimeout);
       }
     }).catch(error => {
@@ -1228,6 +1257,7 @@ export class WebSocketManager {
     this.icebreakerState.delete(chatId);
     this.icebreakerStartSent.delete(chatId);
     IcebreakerService.forgetChat(chatId);
+    AICompanionService.forgetChat(chatId);
   }
 
   // Очистка комнаты чата и локального состояния после завершения
@@ -1430,6 +1460,7 @@ export class WebSocketManager {
 
       if (result.status === 'searching') {
         socket.emit('search:status', { status: 'searching' });
+        this.armAiMatch(userId);
       } else if (result.status === 'cancelled' || result.status === 'expired') {
         socket.emit('search:expired');
       }
@@ -1441,10 +1472,43 @@ export class WebSocketManager {
     }
   }
 
+  /** Через AI_MATCH_DELAY_MS без живого матча — подключаем ИИ-собеседника. */
+  private armAiMatch(userId: string): void {
+    this.clearAiMatch(userId);
+    if (!AICompanionService.enabled) return;
+    // Разброс вокруг базовой задержки (0.5x–1.5x): фиксированные 20с были палевом.
+    const base = this.AI_MATCH_DELAY_MS;
+    const delay = Math.round(base * 0.5 + Math.random() * base);
+    const t = setTimeout(() => {
+      this.aiMatchTimers.delete(userId);
+      AICompanionService.createAiMatch(userId).catch(() => {});
+    }, delay);
+    this.aiMatchTimers.set(userId, t);
+  }
+
+  public clearAiMatch(userId: string): void {
+    const t = this.aiMatchTimers.get(userId);
+    if (t) { clearTimeout(t); this.aiMatchTimers.delete(userId); }
+  }
+
+  /** Рассылка статистики поиска с пер-юзерным сдвигом (цифры не одинаковы для всех). */
+  public async emitPersonalizedStats(stats: SearchStatsSnapshot): Promise<void> {
+    try {
+      const sockets = await this.io.in('search_stats_room').fetchSockets();
+      for (const s of sockets) {
+        const uid = String((s.data as any)?.user?._id || s.id);
+        s.emit('search:stats', SearchService.personalizeStats(stats, uid));
+      }
+    } catch {
+      this.io.to('search_stats_room').emit('search:stats', stats);
+    }
+  }
+
   private async handleSearchCancel(socket: TypedSocket) {
     try {
       const userId = socket.data.user._id.toString();
-      
+      this.clearAiMatch(userId);
+
       // Отменяем поиск через сервис
       const cancelledSearch = await SearchService.cancelSearch(userId);
       

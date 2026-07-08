@@ -108,18 +108,23 @@ export class SearchService {
       maxDistance: criteria.maxDistance
     });
 
-    // Отменяем предыдущий поиск, если есть
-    await Search.findOneAndUpdate(
+    // Отменяем предыдущий поиск, если есть (перебит новым поиском того же юзера)
+    const superseded = await Search.findOneAndUpdate(
       { userId, status: 'searching' },
       { status: 'cancelled' }
     );
+    if (superseded) { void this.logSearchEnd(superseded, 'cancelled', 'superseded'); }
 
     // Узнаем премиум-статус пользователя (снимок на момент старта поиска)
     let isPremium = false;
+    let platform = 'unknown';
     try {
-      const u = await User.findById(userId).select('subscription').lean();
-      if (u && (u as any).subscription?.isActive && (u as any).subscription?.type && (u as any).subscription.type !== 'basic') {
-        isPremium = true;
+      const u = await User.findById(userId).select('subscription authProvider').lean();
+      if (u) {
+        platform = (u as any).authProvider || 'unknown';
+        if ((u as any).subscription?.isActive && (u as any).subscription?.type && (u as any).subscription.type !== 'basic') {
+          isPremium = true;
+        }
       }
     } catch {}
 
@@ -139,7 +144,8 @@ export class SearchService {
       // maxDistance устанавливаем только если используется геолокация
       // Не ограничиваем максимальную дистанцию — ищем без $maxDistance
       maxDistance: undefined,
-      isPremium
+      isPremium,
+      platform
     };
 
     // Добавляем местоположение только если используется геолокация и координаты предоставлены.
@@ -170,6 +176,7 @@ export class SearchService {
         userId: new mongoose.Types.ObjectId(userId),
         telegramId,
         cohort: userCohort,
+        platform,
         name: 'search_start',
         props: {
           gender: criteria.gender,
@@ -179,7 +186,9 @@ export class SearchService {
           desiredAgeMax: criteria.desiredAgeMax,
           minAcceptableRating: criteria.minAcceptableRating ?? -1,
           useGeolocation: criteria.useGeolocation,
-          distanceKm: criteria.maxDistance ?? null
+          distanceKm: criteria.maxDistance ?? null,
+          platform,
+          isPremium
         }
       } as any);
     } catch {}
@@ -193,29 +202,23 @@ export class SearchService {
     });
     
     // Ищем подходящий мэтч
-    const matches = await this.findMatches(search);
+    // Ошибка findMatches (например битые гео-координаты) НЕ должна ронять поиск:
+    // иначе юзер молча «в поиске» без клиентского статуса и без AI-фолбэка.
+    let matches: ISearch[] = [];
+    try {
+      matches = await this.findMatches(search);
+    } catch (e) {
+      wsLogger.warn('find_matches_failed', (e as Error).message, { searchId: search._id?.toString() });
+    }
     if (matches.length > 0) {
       // Выбираем лучший мэтч
-      const bestMatch = this.selectBestMatch(search, matches);
+      const bestMatch = await this.selectBestMatch(search, matches);
       if (search._id && bestMatch._id) {
         await this.createMatch(
           search as ISearch & { _id: mongoose.Types.ObjectId },
           bestMatch as ISearch & { _id: mongoose.Types.ObjectId }
         );
-          // Аналитика: search_end (matched)
-          try {
-            const durationMs = Date.now() - (search.createdAt ? new Date(search.createdAt).getTime() : Date.now());
-            await AnalyticsEvent.create({
-              userId: search.userId,
-              telegramId: search.telegramId,
-              name: 'search_end',
-              props: {
-                outcome: 'matched',
-                durationMs,
-                useGeolocation: search.useGeolocation
-              }
-            } as any);
-          } catch {}
+          // search_end(matched) логируется ВНУТРИ createMatch для ОБОИХ участников
           // Рефералы: отметим квалификацию и наградим реферера (best-effort)
           try { await ReferralService.markQualified(String(search.userId)); } catch {}
           try { await ReferralService.rewardReferrer(String(search.userId)); } catch {}
@@ -238,7 +241,7 @@ export class SearchService {
     };
   }
 
-  static async cancelSearch(userId: string) {
+  static async cancelSearch(userId: string, reason: 'user' | 'disconnect' | 'superseded' = 'user') {
     const search = await Search.findOneAndUpdate(
       { userId, status: 'searching' },
       { status: 'cancelled' },
@@ -248,23 +251,73 @@ export class SearchService {
     // Атомарно обновляем статистику после отмены поиска
     await this.broadcastSearchStats();
 
-    // Аналитика: search_end (cancelled)
-    if (search) {
-      try {
-        const durationMs = Date.now() - (search.createdAt ? new Date(search.createdAt).getTime() : Date.now());
-        await AnalyticsEvent.create({
-          userId: search.userId,
-          telegramId: search.telegramId,
-          name: 'search_end',
-          props: {
-            outcome: 'cancelled',
-            durationMs,
-            useGeolocation: search.useGeolocation
-          }
-        } as any);
-      } catch {}
-    }
+    // Аналитика: search_end (cancelled) с причиной (ручная / обрыв / перебит)
+    if (search) { void this.logSearchEnd(search, 'cancelled', reason); }
     return search;
+  }
+
+  /** Единая durable-запись конца поиска для сквозной аналитики. */
+  private static async logSearchEnd(
+    search: { userId?: mongoose.Types.ObjectId; telegramId?: string; createdAt?: Date; useGeolocation?: boolean; platform?: string },
+    outcome: 'matched' | 'cancelled' | 'expired',
+    reason?: 'user' | 'disconnect' | 'superseded'
+  ): Promise<void> {
+    try {
+      const durationMs = Date.now() - (search.createdAt ? new Date(search.createdAt).getTime() : Date.now());
+      await AnalyticsEvent.create({
+        userId: search.userId,
+        telegramId: search.telegramId,
+        platform: search.platform,
+        name: 'search_end',
+        props: {
+          outcome,
+          ...(reason ? { reason } : {}),
+          durationMs,
+          useGeolocation: search.useGeolocation,
+          platform: search.platform,
+        },
+      } as any);
+    } catch {}
+  }
+
+  /** Свип истёкших поисков: durable-событие 'expired' до удаления по TTL. */
+  static async sweepExpiredSearches(): Promise<void> {
+    try {
+      const cutoff = new Date(Date.now() - 29 * 60 * 1000); // ~перед 30-мин TTL
+      const stale = await Search.find({ status: 'searching', createdAt: { $lte: cutoff } }).limit(200);
+      for (const s of stale) {
+        // Логируем 'expired' ТОЛЬКО если реально перевели из searching (иначе, если
+        // док в этот момент сматчили, был бы двойной/противоречивый outcome).
+        const upd = await Search.updateOne({ _id: s._id, status: 'searching' }, { $set: { status: 'expired' } });
+        if (upd.modifiedCount === 1) void this.logSearchEnd(s as any, 'expired');
+      }
+    } catch (error) {
+      wsLogger.warn('sweep_expired_searches', (error as Error).message);
+    }
+  }
+
+  /**
+   * Повторная попытка мэтча для УЖЕ существующего активного поиска пользователя.
+   * Вызывается на реконнекте: если поиск пережил обрыв и есть ждущий совместимый
+   * собеседник — соединяем сразу, а не ждём, пока кто-то запустит новый поиск.
+   */
+  static async retryMatchForUser(userId: string): Promise<boolean> {
+    const search = await Search.findOne({ userId: new mongoose.Types.ObjectId(userId), status: 'searching' });
+    if (!search || !search._id) return false;
+    try {
+      const matches = await this.findMatches(search as ISearch);
+      if (matches.length === 0) return false;
+      const best = await this.selectBestMatch(search as ISearch, matches);
+      if (!best._id) return false;
+      await this.createMatch(
+        search as ISearch & { _id: mongoose.Types.ObjectId },
+        best as ISearch & { _id: mongoose.Types.ObjectId }
+      );
+      return true;
+    } catch (error) {
+      wsLogger.warn('retry_match_failed', (error as Error).message, { userId });
+      return false;
+    }
   }
 
   private static async findMatches(search: ISearch): Promise<ISearch[]> {
@@ -384,7 +437,7 @@ export class SearchService {
     return Math.ceil(km / 100) * 100;
   }
 
-  private static selectBestMatch(search: ISearch, matches: ISearch[]): ISearch {
+  private static async selectBestMatch(search: ISearch, matches: ISearch[]): Promise<ISearch> {
     try {
       if (!matches || matches.length === 0) {
         wsLogger.info('select_best_match', 'Попытка выбрать лучший матч из пустого массива', {
@@ -393,14 +446,18 @@ export class SearchService {
         throw new Error('No matches available for selection');
       }
 
+      // Анти-повтор: не соединять с недавним партнёром, если есть другие варианты.
+      // (пример: 2 мужчины + 1 женщина — женщина получит того, с кем ещё не общалась)
+      const pool = await this.preferFreshPartners(search, matches);
+
       // Гео-поиск: findMatches уже вернул кандидатов в порядке
-      // «ближайшие гео → не-гео по очереди» — берём первого (ближайшего).
+      // «ближайшие гео → не-гео по очереди» — берём первого (ближайшего) из свежих.
       if (search.useGeolocation && search.location) {
-        return matches[0];
+        return pool[0];
       }
 
       // Приоритезация: premium первыми, затем по времени ожидания (createdAt ASC), и только затем по скору
-      const sorted = matches.slice().sort((a: any, b: any) => {
+      const sorted = pool.slice().sort((a: any, b: any) => {
         const ap = a.isPremium ? 1 : 0;
         const bp = b.isPremium ? 1 : 0;
         if (ap !== bp) return bp - ap; // premium desc
@@ -419,6 +476,37 @@ export class SearchService {
         searchId: search._id?.toString()
       });
       return matches[0];
+    }
+  }
+
+  /**
+   * Оставляет только «свежих» кандидатов — тех, с кем пользователь НЕ соединялся
+   * за последнее время (окно MATCH_REPEAT_WINDOW_MS). Если свежих нет — возвращает
+   * исходный список (лучше повторный матч, чем никакого).
+   */
+  private static async preferFreshPartners(search: ISearch, matches: ISearch[]): Promise<ISearch[]> {
+    try {
+      const RECENT_MS = Number(process.env.MATCH_REPEAT_WINDOW_MS || 3 * 60 * 60 * 1000); // 3 часа
+      const since = new Date(Date.now() - RECENT_MS);
+      const chats = await Chat.find({ participants: search.userId, createdAt: { $gte: since } })
+        .select('participants').lean();
+      const recent = new Set<string>();
+      for (const c of chats) {
+        for (const p of (c as any).participants || []) {
+          const s = String(p);
+          if (s !== String(search.userId)) recent.add(s);
+        }
+      }
+      if (recent.size === 0) return matches;
+      const fresh = matches.filter((m) => !recent.has(String(m.userId)));
+      if (fresh.length > 0 && fresh.length < matches.length) {
+        wsLogger.info('match_avoid_repeat', 'Исключены недавние партнёры из кандидатов', {
+          searchId: search._id?.toString(), total: matches.length, fresh: fresh.length,
+        });
+      }
+      return fresh.length > 0 ? fresh : matches;
+    } catch {
+      return matches;
     }
   }
 
@@ -631,6 +719,12 @@ export class SearchService {
           // Геймификация: матч обоим
           GamificationService.award(String(search1.userId), 'match').catch(() => {});
           GamificationService.award(String(search2.userId), 'match').catch(() => {});
+          // Реальный матч состоялся → снимаем AI-таймеры обоих (иначе бот мог бы
+          // перехватить уже сматченного и уронить живую пару).
+          try { wsManager.clearAiMatch(String(search1.userId)); wsManager.clearAiMatch(String(search2.userId)); } catch {}
+          // Аналитика: search_end(matched) для ОБОИХ участников (раньше — только инициатор)
+          void this.logSearchEnd(search1, 'matched');
+          void this.logSearchEnd(search2, 'matched');
           wsLogger.info('match_created', 'Создан новый матч (tx)', {
             chatId: createdChat._id.toString(),
             search1Id: search1._id.toString(),
@@ -817,26 +911,89 @@ export class SearchService {
       ? avgAgg.reduce((s, r) => s + r.avgMs * (r as unknown as { n: number }).n, 0) / totalN
       : 0;
 
+    // Фиктивный «живой» слой поверх реальных чисел (чтобы не было пусто/нулей)
+    const fb = this.fakeBoost();
     const stats: SearchStatsSnapshot = {
-      t: totalSearching,
-      m: maleSearching,
-      f: femaleSearching,
-      inChat: inChatAgg[0]?.total || 0,
+      t: totalSearching + fb.searching,
+      m: maleSearching + fb.searchingM,
+      f: femaleSearching + fb.searchingF,
+      inChat: (inChatAgg[0]?.total || 0) + fb.inChat,
       online: {
-        t: totalOnline,
-        m: maleOnline,
-        f: femaleOnline,
+        t: totalOnline + fb.online,
+        m: maleOnline + fb.onlineM,
+        f: femaleOnline + fb.onlineF,
       },
       avgSearchTime: {
-        t: toSec(avgAllMs),
-        m: toSec(avgByGender.get('male')),
-        f: toSec(avgByGender.get('female')),
-        matches24h: chats24h,
+        t: toSec(avgAllMs) || fb.avgSec,
+        m: toSec(avgByGender.get('male')) || fb.avgSec,
+        f: toSec(avgByGender.get('female')) || fb.avgSec,
+        matches24h: chats24h + fb.matches24h,
       },
     };
 
     this.statsCache = { data: stats, timestamp: Date.now() };
     return stats;
+  }
+
+  /**
+   * Фиктивный «живой» слой поверх реальной статистики (иначе видно, что пусто).
+   * Стабилен в пределах ~3-минутного окна (не прыгает на каждом бродкасте),
+   * плавно меняется по времени суток (МСК), с перекосом на женщин под мужскую
+   * аудиторию. Отключается FAKE_STATS_ENABLED=false. Настройка масштаба —
+   * FAKE_STATS_SCALE (множитель, дефолт 1).
+   */
+  private static fakeWalk: { online: number; searching: number; inChat: number; avgSec: number; at: number } | null = null;
+  private static fakeBoost() {
+    const zero = { online: 0, onlineM: 0, onlineF: 0, searching: 0, searchingM: 0, searchingF: 0, inChat: 0, matches24h: 0, avgSec: 0 };
+    if (String(process.env.FAKE_STATS_ENABLED ?? 'true') === 'false') return zero;
+    const scale = Number(process.env.FAKE_STATS_SCALE || 1) || 1;
+    const now = Date.now();
+    const mskHour = (((new Date(now).getUTCHours() + 3) % 24) + 24) % 24;
+    // Кривая онлайна по часам МСК: ночью мало, вечером пик.
+    const curve = [46, 34, 26, 22, 20, 24, 34, 60, 88, 118, 138, 150, 158, 168, 158, 156, 170, 196, 236, 270, 250, 208, 150, 88];
+    const dow = new Date(now).getUTCDay();
+    const weekend = (dow === 0 || dow === 6) ? 1.12 : 1;
+    const base = (curve[mskHour] || 120) * scale * weekend;
+    // ЖИВОЕ случайное блуждание вокруг цели дня: обновляем не чаще ~11с (люди приходят/уходят).
+    const STEP_MS = 11000;
+    const st = this.fakeWalk;
+    if (!st || now - st.at > STEP_MS) {
+      const prev = st ? st.online : base;
+      const pull = (base - prev) * 0.2;                             // притяжение к «норме» часа
+      const noise = (Math.random() - 0.5) * Math.max(6, base * 0.07); // приход/уход людей
+      const online = Math.max(12, Math.round(prev + pull + noise));
+      const searching = Math.max(3, Math.round(online * (0.10 + Math.random() * 0.06)));
+      const inChat = Math.round(online * (0.28 + Math.random() * 0.14));
+      const avgSec = 45 + Math.round(Math.random() * 45);
+      this.fakeWalk = { online, searching, inChat, avgSec, at: now };
+    }
+    const w = this.fakeWalk!;
+    const onlineF = Math.round(w.online * 0.60); // перекос на женщин
+    const onlineM = w.online - onlineF;
+    const searchingF = Math.round(w.searching * 0.6);
+    const searchingM = w.searching - searchingF;
+    const matches24h = Math.round(base * 2.5 + (Math.floor(now / 60000) % 60));
+    return { online: w.online, onlineM, onlineF, searching: w.searching, searchingM, searchingF, inChat: w.inChat, matches24h, avgSec: w.avgSec };
+  }
+
+  /**
+   * Пер-юзерный сдвиг статистики: у каждого свой стабильный множитель 0.90..1.10,
+   * чтобы цифры были «не для всех одинаковыми» (иначе видно, что фейк). Время в
+   * avgSearchTime не трогаем (это не счётчик). Без фейка — без персонализации.
+   */
+  static personalizeStats(stats: SearchStatsSnapshot, userId: string): SearchStatsSnapshot {
+    if (String(process.env.FAKE_STATS_ENABLED ?? 'true') === 'false') return stats;
+    let h = 2166136261;
+    const s = String(userId);
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    const mul = 0.9 + ((h % 1000) / 1000) * 0.2;
+    const j = (n: number) => Math.max(0, Math.round(n * mul));
+    return {
+      t: j(stats.t), m: j(stats.m), f: j(stats.f),
+      inChat: j(stats.inChat),
+      online: { t: j(stats.online.t), m: j(stats.online.m), f: j(stats.online.f) },
+      avgSearchTime: { ...stats.avgSearchTime, matches24h: j(stats.avgSearchTime.matches24h) },
+    };
   }
 
   static async getUserActiveSearch(userId: string) {
@@ -860,7 +1017,7 @@ export class SearchService {
       // getSearchStats: если кэш уже освежили в окне дебаунса — без лишнего пересчёта
       this.getSearchStats()
         .then((stats) => {
-          wsManager.io.to('search_stats_room').emit('search:stats', stats);
+          void wsManager.emitPersonalizedStats(stats);
         })
         .catch((error) => {
           logger.error('Failed to broadcast search stats', {

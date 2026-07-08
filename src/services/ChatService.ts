@@ -7,6 +7,7 @@ import { SearchService } from './SearchService';
 import { BlockService } from './BlockService';
 import { gameManager } from './GameService';
 import { GamificationService } from './GamificationService';
+import { AICompanionService } from './AICompanionService';
 
 export class ChatService {
   static async sendMessage(
@@ -85,6 +86,9 @@ export class ChatService {
 
     // Живое сообщение перезапускает таймер тишины для авто-айсбрейкера
     wsManager.noteChatMessage(chatId, userId);
+
+    // Если это чат с ИИ-собеседником — он ответит (no-op для обычных чатов)
+    AICompanionService.onUserMessage(chatId, userId).catch(() => {});
 
     // Геймификация: XP за общение (внутри — анти-спам кап)
     GamificationService.award(userId, 'message').catch(() => {});

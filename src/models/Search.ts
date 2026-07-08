@@ -24,6 +24,8 @@ export interface ISearch {
   maxDistance?: number; // в километрах
   // Премиум-признак на момент начала поиска (снимок для приоритезации очереди)
   isPremium?: boolean;
+  // Платформа на момент поиска (для сквозной аналитики): telegram | web | vk
+  platform?: string;
 
   // Результат мэтчинга
   matchedWith?: {
@@ -116,7 +118,10 @@ const searchSchema = new mongoose.Schema<ISearch>({
     type: Boolean,
     default: false
   },
-  
+  platform: {
+    type: String
+  },
+
   matchedWith: {
     userId: {
       type: mongoose.Schema.Types.ObjectId,
