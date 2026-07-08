@@ -352,6 +352,8 @@ export class WebSocketManager {
         } catch (error) {
           wsLogger.error('stats_initial', userId, error as Error);
         }
+        // Счётчик оставшихся поисков при открытии экрана поиска
+        void this.sendSearchQuota(userId);
       });
 
       socket.on('search:unsubscribe_stats', () => {
@@ -1459,6 +1461,7 @@ export class WebSocketManager {
       if (!limit.canSearch) {
         this.sendToUser(userId, 'search:limit', { message: limit.reason, resetInMin: limit.resetInMin });
         this.sendToUser(userId, 'search:error', { message: limit.reason || 'Лимит поисков исчерпан' });
+        void this.sendSearchQuota(userId);
         return;
       }
 
@@ -1474,6 +1477,8 @@ export class WebSocketManager {
       } else if (result.status === 'cancelled' || result.status === 'expired') {
         socket.emit('search:expired');
       }
+      // Обновляем счётчик оставшихся бесплатных поисков (списание уже произошло)
+      void this.sendSearchQuota(userId);
     } catch (error) {
       wsLogger.error('handle_search_start_error', userId, error as Error);
       this.sendToUser(userId, 'search:error', {
@@ -1499,6 +1504,14 @@ export class WebSocketManager {
   public clearAiMatch(userId: string): void {
     const t = this.aiMatchTimers.get(userId);
     if (t) { clearTimeout(t); this.aiMatchTimers.delete(userId); }
+  }
+
+  /** Отправляет пользователю его квоту поиска (для счётчика «осталось N»). */
+  public async sendSearchQuota(userId: string): Promise<void> {
+    try {
+      const q = await MonetizationService.getSearchQuota(userId);
+      this.sendToUser(userId, 'search:quota', q);
+    } catch { /* noop */ }
   }
 
   /** Рассылка статистики поиска с пер-юзерным сдвигом (цифры не одинаковы для всех). */

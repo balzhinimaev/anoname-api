@@ -171,6 +171,24 @@ export class MonetizationService {
     return { canSearch: true, remaining: this.SEARCH_LIMIT - count };
   }
 
+  /** Текущая квота поиска (read-only) для показа счётчика «осталось N». remaining=-1 у Premium (безлимит). */
+  static async getSearchQuota(userId: string): Promise<{ premium: boolean; limit: number; remaining: number; resetInMin: number }> {
+    const user = await User.findById(userId).select('subscription limits').lean();
+    if (!user) return { premium: false, limit: this.SEARCH_LIMIT, remaining: this.SEARCH_LIMIT, resetInMin: 0 };
+    if (this.isPremium((user as any).subscription)) return { premium: true, limit: this.SEARCH_LIMIT, remaining: -1, resetInMin: 0 };
+    const now = Date.now();
+    const limits: any = (user as any).limits || {};
+    let count = limits.searchHourCount || 0;
+    const resetAt = limits.searchHourResetAt ? new Date(limits.searchHourResetAt).getTime() : 0;
+    if (!resetAt || now >= resetAt) count = 0;
+    return {
+      premium: false,
+      limit: this.SEARCH_LIMIT,
+      remaining: Math.max(0, this.SEARCH_LIMIT - count),
+      resetInMin: resetAt > now ? Math.ceil((resetAt - now) / 60000) : 0,
+    };
+  }
+
   /** Атомарно списывает одну попытку часового лимита (вызывать на старте поиска, если не Premium). */
   static async consumeSearch(userId: string): Promise<void> {
     const user = await User.findById(userId).select('subscription limits');

@@ -154,6 +154,7 @@ export interface ServerToClientEvents {
 
   'search:error': (data: { message: string }) => void;
   'search:limit': (data: { message?: string; resetInMin?: number }) => void;
+  'search:quota': (data: { premium: boolean; limit: number; remaining: number; resetInMin: number }) => void;
 
   // Предстартовая очередь
   'prelaunch:stats': (data: { count: number }) => void;
