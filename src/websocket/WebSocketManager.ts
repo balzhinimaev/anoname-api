@@ -4,6 +4,7 @@ import { socketAuth } from './middleware/auth';
 import { ClientToServerEvents, ServerToClientEvents, SocketData, TypedSocket } from './types';
 import { ChatService } from '../services/ChatService';
 import { SearchService, SearchCriteria, SearchStatsSnapshot } from '../services/SearchService';
+import { MonetizationService } from '../services/MonetizationService';
 import { wsLogger } from '../utils/logger';
 import { metricsCollector } from '../utils/metrics';
 import { CircuitBreaker } from '../utils/CircuitBreaker';
@@ -1452,6 +1453,15 @@ export class WebSocketManager {
           return;
         }
       }
+      // Часовой лимит поиска (бесплатно): при исчерпании — структурное событие
+      // search:limit, чтобы клиент показал окно оплаты Premium (а не просто ошибку).
+      const limit = await MonetizationService.canUserSearch(userId);
+      if (!limit.canSearch) {
+        this.sendToUser(userId, 'search:limit', { message: limit.reason, resetInMin: limit.resetInMin });
+        this.sendToUser(userId, 'search:error', { message: limit.reason || 'Лимит поисков исчерпан' });
+        return;
+      }
+
       const result = await SearchService.startSearch(
         userId,
         socket.data.user.telegramId,

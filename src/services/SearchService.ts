@@ -77,7 +77,9 @@ export class SearchService {
       throw new Error(canSearch.reason || 'Поиск недоступен');
     }
 
-    // НЕ списываем попытку здесь - только при успешном матче
+    // Списываем попытку часового лимита на СТАРТЕ поиска (каждый поиск = попытка;
+    // Premium не списывается). Так лимит «2 поиска в час» реально ограничивает.
+    await MonetizationService.consumeSearch(userId).catch(() => {});
 
     // Добавляем логирование полученных критериев
     wsLogger.info('search_service_start', 'Запуск поиска в сервисе', {

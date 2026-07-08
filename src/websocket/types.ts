@@ -153,6 +153,7 @@ export interface ServerToClientEvents {
   'error': (data: { message: string }) => void;
 
   'search:error': (data: { message: string }) => void;
+  'search:limit': (data: { message?: string; resetInMin?: number }) => void;
 
   // Предстартовая очередь
   'prelaunch:stats': (data: { count: number }) => void;

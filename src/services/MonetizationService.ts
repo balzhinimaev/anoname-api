@@ -136,9 +136,57 @@ export class MonetizationService {
   /**
    * Проверяет может ли пользователь выполнить поиск
    */
-  static async canUserSearch(_userId: string): Promise<{ canSearch: boolean; reason?: string }> {
-    // Лимиты поиска отключены — поиск безлимитный для всех пользователей.
-    return { canSearch: true };
+  private static readonly SEARCH_LIMIT = Number(process.env.SEARCH_HOURLY_LIMIT || 2);
+  private static readonly SEARCH_WINDOW_MS = Number(process.env.SEARCH_LIMIT_WINDOW_MS || 60 * 60 * 1000);
+
+  /** Активна ли платная подписка (безлимит) у пользователя. */
+  private static isPremium(sub: any): boolean {
+    return !!(sub?.isActive && sub?.type && sub.type !== 'basic' && (!sub.endDate || new Date(sub.endDate).getTime() > Date.now()));
+  }
+
+  /**
+   * Проверка возможности поиска (READ-ONLY, без списания): бесплатно — не больше
+   * SEARCH_HOURLY_LIMIT поисков в час (восполняется), Premium — безлимит.
+   * Списание делает consumeSearch() на старте поиска.
+   */
+  static async canUserSearch(userId: string): Promise<{ canSearch: boolean; reason?: string; remaining?: number; resetInMin?: number; premium?: boolean }> {
+    const user = await User.findById(userId).select('subscription limits').lean();
+    if (!user) return { canSearch: false, reason: 'Пользователь не найден' };
+    if (this.isPremium((user as any).subscription)) return { canSearch: true, premium: true };
+
+    const now = Date.now();
+    const limits = (user as any).limits || {};
+    let count = limits.searchHourCount || 0;
+    let resetAt = limits.searchHourResetAt ? new Date(limits.searchHourResetAt).getTime() : 0;
+    if (!resetAt || now >= resetAt) { count = 0; resetAt = now + this.SEARCH_WINDOW_MS; }
+    if (count >= this.SEARCH_LIMIT) {
+      const mins = Math.max(1, Math.ceil((resetAt - now) / 60000));
+      return {
+        canSearch: false,
+        reason: `Лимит бесплатных поисков (${this.SEARCH_LIMIT} в час) исчерпан. Обновится через ~${mins} мин. Оформите Premium, чтобы искать без ограничений.`,
+        remaining: 0,
+        resetInMin: mins,
+      };
+    }
+    return { canSearch: true, remaining: this.SEARCH_LIMIT - count };
+  }
+
+  /** Атомарно списывает одну попытку часового лимита (вызывать на старте поиска, если не Premium). */
+  static async consumeSearch(userId: string): Promise<void> {
+    const user = await User.findById(userId).select('subscription limits');
+    if (!user) return;
+    if (this.isPremium((user as any).subscription)) return; // Premium — не списываем
+    const now = Date.now();
+    const limits: any = (user as any).limits || {};
+    const resetAt = limits.searchHourResetAt ? new Date(limits.searchHourResetAt).getTime() : 0;
+    if (!resetAt || now >= resetAt) {
+      limits.searchHourCount = 1;
+      limits.searchHourResetAt = new Date(now + this.SEARCH_WINDOW_MS);
+    } else {
+      limits.searchHourCount = (limits.searchHourCount || 0) + 1;
+    }
+    (user as any).limits = limits;
+    await user.save();
   }
 
   /**

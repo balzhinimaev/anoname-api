@@ -127,8 +127,12 @@ export interface IUser extends Document {
     maxSearchDistance: number;
     /** Можно ли использовать расширенные фильтры */
     canUseAdvancedFilters: boolean;
+    /** Часовой лимит поиска: сколько поисков израсходовано в текущем окне */
+    searchHourCount?: number;
+    /** Когда сбросится (восполнится) часовой лимит поиска */
+    searchHourResetAt?: Date;
   };
-  
+
   /** Статистика для аналитики */
   analytics?: {
     /** Общее количество матчей */
@@ -226,7 +230,9 @@ const UserSchema: Schema = new Schema({
     searchesToday: { type: Number, default: 0 },
     lastReset: { type: Date, default: Date.now },
     maxSearchDistance: { type: Number, default: 10 }, // 10км для базовых
-    canUseAdvancedFilters: { type: Boolean, default: false }
+    canUseAdvancedFilters: { type: Boolean, default: false },
+    searchHourCount: { type: Number, default: 0 },      // израсходовано поисков в текущем часовом окне
+    searchHourResetAt: { type: Date }                   // когда окно восполнится
   },
   
   analytics: {
