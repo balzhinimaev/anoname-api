@@ -58,9 +58,11 @@ const MAX_AI_MESSAGES = 50;
 // Тайминги «как живой человек» (настраиваются через .env)
 const THINK_MIN_MS = Number(process.env.AI_THINK_MIN_MS || 2000);   // «обдумывает» перед набором
 const THINK_MAX_MS = Number(process.env.AI_THINK_MAX_MS || 3500);
-const TYPE_PER_CHAR_MS = Number(process.env.AI_TYPE_MS_PER_CHAR || 1200); // ~50 знаков/мин
-const TYPE_MIN_MS = Number(process.env.AI_TYPE_MIN_MS || 2500);
-const TYPE_MAX_MS = Number(process.env.AI_TYPE_MAX_MS || 15000);     // потолок на одно сообщение
+// Скорость набора: случайно на каждое сообщение (знаков/мин), от медленного к быстрому.
+const TYPE_CPM_MIN = Number(process.env.AI_TYPE_CPM_MIN || 80);
+const TYPE_CPM_MAX = Number(process.env.AI_TYPE_CPM_MAX || 150);
+const TYPE_MIN_MS = Number(process.env.AI_TYPE_MIN_MS || 900);
+const TYPE_MAX_MS = Number(process.env.AI_TYPE_MAX_MS || 9000);      // потолок на одно сообщение
 const AI_MAX_CONCURRENT = Number(process.env.AI_MAX_CONCURRENT || 8); // лимит одновременных вызовов OpenAI
 
 const rnd = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1));
@@ -177,10 +179,12 @@ class AICompanionServiceImpl {
         await AnalyticsEvent.create({ userId: search.userId, telegramId: search.telegramId, platform: (search as any).platform, name: 'search_end', props: { outcome: 'matched', ai: true, durationMs, platform: (search as any).platform } } as any);
       } catch {}
 
-      // Кто пишет первым: 60% — персона быстро (2–6с), 40% — «подождёт» (12–20с),
-      // но если юзер напишет раньше — onUserMessage отменит опенер и ответит.
-      const quick = Math.random() < 0.6;
-      this.scheduleTurn(chatId, personaId, 'opener', quick ? rnd(2000, 6000) : rnd(12000, 20000));
+      // Первым пишет ЖИВОЙ пользователь — персона молчит до его первого сообщения
+      // (в контакт не вступаем, пока он не начнёт). Опенер можно вернуть env-флагом.
+      if (String(process.env.AI_OPENER_ENABLED ?? 'false') === 'true') {
+        const quick = Math.random() < 0.6;
+        this.scheduleTurn(chatId, personaId, 'opener', quick ? rnd(2000, 6000) : rnd(12000, 20000));
+      }
     } catch (error) {
       wsLogger.error('ai_match_create', 'system', error as Error, { userId });
     }
@@ -262,7 +266,8 @@ class AICompanionServiceImpl {
         if (!(await this.chatActive(chatId))) { this.stopTyping(chatId, personaId); return; }
         wsManager.io.to(`chat:${chatId}`).emit('chat:start_typing', { chatId, userId: personaId });
         const b = bubbles[i];
-        await sleep(Math.min(TYPE_MAX_MS, Math.max(TYPE_MIN_MS, b.length * TYPE_PER_CHAR_MS)));
+        const cpm = rnd(TYPE_CPM_MIN, TYPE_CPM_MAX);        // случайная скорость набора на сообщение
+        await sleep(Math.min(TYPE_MAX_MS, Math.max(TYPE_MIN_MS, Math.round(b.length * (60000 / cpm)))));
         if (!(await this.chatActive(chatId))) { this.stopTyping(chatId, personaId); return; }
         await this.sendBubble(chatId, personaId, b);
         this.replyCount.set(chatId, (this.replyCount.get(chatId) || 0) + 1);
