@@ -36,7 +36,7 @@ export const SUBSCRIPTION_TIERS: Record<string, SubscriptionTier> = {
   },
   premium_1day: {
     type: 'premium',
-    price: 10,
+    price: 149,
     duration: 1, // 1 день
     features: {
       unlimitedSearches: true,
@@ -47,7 +47,7 @@ export const SUBSCRIPTION_TIERS: Record<string, SubscriptionTier> = {
   },
   premium_7days: {
     type: 'premium',
-    price: 249,
+    price: 299,
     duration: 7, // 7 дней
     features: {
       unlimitedSearches: true,
@@ -58,7 +58,7 @@ export const SUBSCRIPTION_TIERS: Record<string, SubscriptionTier> = {
   },
   premium_forever: {
     type: 'premium',
-    price: 699,
+    price: 901,
     duration: -1, // -1 означает навсегда
     features: {
       unlimitedSearches: true,
@@ -79,9 +79,9 @@ export interface PurchaseItem {
 export const PURCHASE_ITEMS: Record<string, PurchaseItem> = {
   boosts_1: { type: 'boosts', amount: 1, price: 99 },
   boosts_5: { type: 'boosts', amount: 5, price: 399 },
-  premium_1day: { type: 'subscription', subscriptionType: 'premium', price: 10 },
-  premium_7days: { type: 'subscription', subscriptionType: 'premium', price: 249 },
-  premium_forever: { type: 'subscription', subscriptionType: 'premium', price: 699 }
+  premium_1day: { type: 'subscription', subscriptionType: 'premium', price: 149 },
+  premium_7days: { type: 'subscription', subscriptionType: 'premium', price: 299 },
+  premium_forever: { type: 'subscription', subscriptionType: 'premium', price: 901 }
 };
 
 export class MonetizationService {
