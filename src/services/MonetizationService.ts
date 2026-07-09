@@ -437,7 +437,7 @@ export class MonetizationService {
         body: JSON.stringify({
           amount: { value: amount.toFixed(2), currency: 'RUB' },
           capture: true,
-          confirmation: { type: 'redirect', return_url: `${config.clientUrl}/payment/return` },
+          confirmation: { type: 'redirect', return_url: `${config.clientUrl}/app/?payment=success` },
           description,
           metadata,
           receipt
