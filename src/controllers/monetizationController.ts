@@ -116,6 +116,50 @@ export const makePurchase = async (req: Request, res: Response): Promise<void> =
 };
 
 /**
+ * Диапазоны IP, с которых YooKassa шлёт уведомления.
+ * https://yookassa.ru/developers/using-api/webhooks (раздел «IP-адреса»).
+ * Основной способ верификации: basic-auth из URL YooKassa не передаёт,
+ * а уведомления по умолчанию не подписывает.
+ */
+const YOOKASSA_IP_CIDRS: Array<[string, number]> = [
+  ['185.71.76.0', 27],
+  ['185.71.77.0', 27],
+  ['77.75.153.0', 25],
+  ['77.75.154.128', 25],
+  ['77.75.156.11', 32],
+  ['77.75.156.35', 32],
+];
+
+const ipv4ToInt = (ip: string): number | null => {
+  const parts = ip.trim().split('.');
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const p of parts) {
+    const o = Number(p);
+    if (!Number.isInteger(o) || o < 0 || o > 255) return null;
+    n = ((n << 8) | o) >>> 0;
+  }
+  return n >>> 0;
+};
+
+const isYooKassaIp = (rawIp: string): boolean => {
+  if (!rawIp) return false;
+  let ip = rawIp.trim();
+  const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (mapped) ip = mapped[1] as string;
+  // IPv6-диапазон YooKassa: 2a02:5180::/32
+  if (ip.toLowerCase().startsWith('2a02:5180:')) return true;
+  const ipInt = ipv4ToInt(ip);
+  if (ipInt === null) return false;
+  return YOOKASSA_IP_CIDRS.some(([net, bits]) => {
+    const netInt = ipv4ToInt(net);
+    if (netInt === null) return false;
+    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+    return (ipInt & mask) === (netInt & mask);
+  });
+};
+
+/**
  * Вебхук подтверждения платежа от YooKassa
  */
 export const yookassaWebhook = async (req: Request, res: Response): Promise<void> => {
@@ -132,22 +176,26 @@ export const yookassaWebhook = async (req: Request, res: Response): Promise<void
       headers: sanitizeHeaders(req.headers as any),
       body: req.body
     });
-    // 1) Валидация базовой авторизации вебхука (рекомендуется настроить в YooKassa basic-auth)
+    // Верификация вебхука. YooKassa НЕ передаёт basic-auth из URL и по умолчанию
+    // не подписывает уведомления — поэтому основной способ — проверка IP-источника
+    // (+ обязательная сверка платежа с API в confirmAndApplyPayment ниже).
+    // 1) basic-auth — опционально: проверяем, только если заголовок реально прислан.
+    let authVerified = false;
     if (config.yookassa.webhookUser && config.yookassa.webhookPassword) {
       const auth = req.headers['authorization'];
-      if (!auth || !auth.startsWith('Basic ')) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
-      }
-      const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
-      const [user, pass] = decoded.split(':');
-      if (user !== config.yookassa.webhookUser || pass !== config.yookassa.webhookPassword) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
+      if (auth && auth.startsWith('Basic ')) {
+        const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
+        const [user, pass] = decoded.split(':');
+        if (user === config.yookassa.webhookUser && pass === config.yookassa.webhookPassword) {
+          authVerified = true;
+        } else {
+          res.status(401).json({ error: 'Unauthorized' });
+          return;
+        }
       }
     }
 
-    // 2) Проверка подписи тела (если вы настроили передачу сигнатуры через заголовок X-Content-SHA256)
+    // 2) Проверка подписи тела (если настроена передача сигнатуры через заголовок X-Content-SHA256)
     const signatureHeader = (req.headers['x-content-sha256'] || req.headers['x-yookassa-signature-sha256']) as string | undefined;
     if (signatureHeader) {
       const secretKey = (config.yookassa.mode === 'test' ? config.yookassa.secretKeyTest : config.yookassa.secretKeyProd) || '';
@@ -162,14 +210,23 @@ export const yookassaWebhook = async (req: Request, res: Response): Promise<void
         return;
       }
     }
+    const signatureVerified = Boolean(signatureHeader);
 
-    // Fail-closed: в prod-режиме вебхук ОБЯЗАН быть подтверждён хотя бы одним
-    // способом (basic-auth ИЛИ подпись тела). Иначе поддельное уведомление с
-    // подобранным paymentId могло бы активировать премиум без реальной оплаты.
-    const basicAuthConfigured = Boolean(config.yookassa.webhookUser && config.yookassa.webhookPassword);
-    const signaturePresent = Boolean(signatureHeader);
-    if (config.yookassa.mode === 'prod' && !basicAuthConfigured && !signaturePresent) {
-      logger.warn('YooKassa webhook rejected: не настроена верификация в prod', { type: 'yookassa_webhook_unverified' });
+    // 3) Проверка IP-источника (диапазоны YooKassa). За nginx реальный адрес — в X-Real-IP.
+    const clientIp = String(
+      (req.headers['x-real-ip'] as string) ||
+      ((req.headers['x-forwarded-for'] as string) || '').split(',')[0] ||
+      req.ip || ''
+    ).trim();
+    const ipVerified = isYooKassaIp(clientIp);
+
+    // Fail-closed: в prod вебхук обязан быть подтверждён хотя бы одним способом
+    // (IP YooKassa, basic-auth или подпись). Плюс покупка применяется только после
+    // сверки платежа с API YooKassa в confirmAndApplyPayment — подделать нельзя.
+    if (config.yookassa.mode === 'prod' && !ipVerified && !authVerified && !signatureVerified) {
+      logger.warn('YooKassa webhook rejected: источник не верифицирован', {
+        type: 'yookassa_webhook_unverified', clientIp
+      });
       res.status(401).json({ error: 'Webhook verification required' });
       return;
     }
