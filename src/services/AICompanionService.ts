@@ -5,6 +5,7 @@ import User from '../models/User';
 import Search, { ISearch } from '../models/Search';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { GamificationService } from './GamificationService';
+import { MonetizationService } from './MonetizationService';
 import { wsManager } from '../server';
 import config from '../config';
 import { wsLogger } from '../utils/logger';
@@ -64,6 +65,10 @@ const TYPE_CPM_MAX = Number(process.env.AI_TYPE_CPM_MAX || 150);
 const TYPE_MIN_MS = Number(process.env.AI_TYPE_MIN_MS || 900);
 const TYPE_MAX_MS = Number(process.env.AI_TYPE_MAX_MS || 9000);      // потолок на одно сообщение
 const AI_MAX_CONCURRENT = Number(process.env.AI_MAX_CONCURRENT || 8); // лимит одновременных вызовов OpenAI
+// Не-премиум: ИИ-диалог живёт ограниченно, затем «собеседник уходит».
+// Premium снимает ограничение (плюшка подписки). Значения — в мс.
+const AI_CHAT_TTL_MIN_MS = Number(process.env.AI_CHAT_TTL_MIN_MS || 40_000);
+const AI_CHAT_TTL_MAX_MS = Number(process.env.AI_CHAT_TTL_MAX_MS || 70_000);
 
 const rnd = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -86,6 +91,7 @@ class AICompanionServiceImpl {
   private nudgeCount = new Map<string, number>();
   private saidBye = new Set<string>();
   private personaActiveChats = new Map<string, number>(); // personaId -> кол-во активных ИИ-чатов (анти-коллизия)
+  private aiChatTtlTimers = new Map<string, NodeJS.Timeout>(); // chatId -> таймер авто-разрыва (не-премиум)
 
   get enabled(): boolean {
     return String(process.env.AI_COMPANION_ENABLED ?? 'true') !== 'false' && !!config.openai.apiKey;
@@ -178,6 +184,10 @@ class AICompanionServiceImpl {
         const durationMs = Date.now() - (search.createdAt ? new Date(search.createdAt).getTime() : Date.now());
         await AnalyticsEvent.create({ userId: search.userId, telegramId: search.telegramId, platform: (search as any).platform, name: 'search_end', props: { outcome: 'matched', ai: true, durationMs, platform: (search as any).platform } } as any);
       } catch {}
+
+      // Не-премиум: диалог с ИИ разрываем через 40–70с («собеседник ушёл»).
+      // Premium — без ограничения. Проверка премиума и таймер — внутри.
+      this.armAiChatTtl(chatId, personaId, String(userId));
 
       // Первым пишет ЖИВОЙ пользователь — персона молчит до его первого сообщения
       // (в контакт не вступаем, пока он не начнёт). Опенер можно вернуть env-флагом.
@@ -444,6 +454,43 @@ class AICompanionServiceImpl {
     return out;
   }
 
+  /**
+   * Не-премиум: планирует авто-разрыв ИИ-диалога через 40–70с (рандом).
+   * Премиум-пользователей не трогаем (безлимитный диалог — плюшка подписки).
+   * При ошибке проверки премиума диалог НЕ рвём (не рискуем чатом платящего).
+   */
+  private armAiChatTtl(chatId: string, personaId: string, userId: string): void {
+    void (async () => {
+      try {
+        const quota = await MonetizationService.getSearchQuota(userId);
+        if (quota.premium) return; // Premium — без разрыва
+      } catch {
+        return; // не смогли определить статус — безопаснее не рвать
+      }
+      const prev = this.aiChatTtlTimers.get(chatId);
+      if (prev) clearTimeout(prev);
+      const ttl = rnd(AI_CHAT_TTL_MIN_MS, AI_CHAT_TTL_MAX_MS);
+      const t = setTimeout(() => {
+        this.aiChatTtlTimers.delete(chatId);
+        this.endAiChatByTtl(chatId, personaId).catch((e) => wsLogger.warn('ai_ttl_end', (e as Error).message, { chatId }));
+      }, ttl);
+      this.aiChatTtlTimers.set(chatId, t);
+    })();
+  }
+
+  /** Разрывает ИИ-чат как «собеседник покинул чат» (для не-премиум по таймеру). */
+  private async endAiChatByTtl(chatId: string, personaId: string): Promise<void> {
+    if (!(await this.chatActive(chatId))) return;
+    // Гасим любые отложенные ходы персоны, чтобы не писать после разрыва.
+    const pend = this.pendingTimers.get(chatId); if (pend) { clearTimeout(pend); this.pendingTimers.delete(chatId); }
+    this.clearIdle(chatId);
+    this.stopTyping(chatId, personaId);
+    // Ленивый импорт — разрываем цикл зависимостей ChatService <-> AICompanionService.
+    const { ChatService } = await import('./ChatService');
+    await ChatService.endChat(chatId, personaId, 'partner_disconnected');
+    wsLogger.info('ai_chat_ttl_ended', `AI chat ${chatId} auto-ended (free user TTL)`, { chatId });
+  }
+
   forgetChat(chatId: string): void {
     const pid = this.aiChatCache.get(chatId);
     if (pid) this.decPersona(pid);
@@ -454,6 +501,7 @@ class AICompanionServiceImpl {
     this.nudgeCount.delete(chatId);
     this.saidBye.delete(chatId);
     const t = this.pendingTimers.get(chatId); if (t) { clearTimeout(t); this.pendingTimers.delete(chatId); }
+    const ttl = this.aiChatTtlTimers.get(chatId); if (ttl) { clearTimeout(ttl); this.aiChatTtlTimers.delete(chatId); }
     this.clearIdle(chatId);
     this.inFlight.delete(chatId);
   }
