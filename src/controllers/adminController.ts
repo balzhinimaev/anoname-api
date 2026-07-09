@@ -283,3 +283,56 @@ export const launchLeadCampaign = async (req: Request, res: Response): Promise<v
 };
 
 
+
+/**
+ * Сводка по монетизации: выручка, платежи, конверсия в платящих.
+ * GET /api/admin/monetization/stats?days=30
+ */
+export const getMonetizationStats = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const days = Math.min(365, Math.max(1, parseInt(String(req.query.days || '30'), 10)));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const PaymentLog = (await import('../models/Payment')).default;
+
+    const [byStatus, revenueByDay, byItem, totalUsers, premiumActive, payingUsers] = await Promise.all([
+      PaymentLog.aggregate([
+        { $match: { createdAt: { $gte: since } } },
+        { $group: { _id: '$status', count: { $sum: 1 } } }
+      ]),
+      PaymentLog.aggregate([
+        { $match: { status: 'applied', createdAt: { $gte: since }, 'payload.test': { $ne: true } } },
+        { $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          revenue: { $sum: { $toDouble: { $ifNull: ['$payload.amount.value', '0'] } } },
+          payments: { $sum: 1 }
+        } },
+        { $sort: { _id: 1 } }
+      ]),
+      PaymentLog.aggregate([
+        { $match: { status: 'applied', createdAt: { $gte: since } } },
+        { $group: { _id: '$itemKey', count: { $sum: 1 } } }
+      ]),
+      User.countDocuments({}),
+      User.countDocuments({ 'subscription.isActive': true, 'subscription.type': { $ne: 'basic' } }),
+      PaymentLog.distinct('userId', { status: 'applied' }).then((ids) => ids.filter(Boolean).length)
+    ]);
+
+    const totalRevenue = revenueByDay.reduce((s: number, d: any) => s + (d.revenue || 0), 0);
+    res.json({
+      success: true,
+      data: {
+        periodDays: days,
+        totalRevenue,
+        revenueByDay,
+        paymentsByStatus: byStatus,
+        appliedByItem: byItem,
+        totalUsers,
+        premiumActive,
+        payingUsers,
+        payingConversion: totalUsers ? +(payingUsers / totalUsers * 100).toFixed(2) : 0
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Не удалось получить статистику монетизации' });
+  }
+};

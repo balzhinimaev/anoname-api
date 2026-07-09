@@ -5,16 +5,19 @@
 
 import { Router } from 'express';
 import { authMiddleware } from '../middleware/authMiddleware';
-import { 
+import {
   getUserStatus,
-  getSubscriptionTiers, 
+  getSubscriptionTiers,
   getPurchaseItems,
   makePurchase,
   checkSearchAvailability,
   getSearchLimits,
   checkBoostAvailability,
   yookassaWebhook,
-  starsPaymentSuccess
+  starsPaymentSuccess,
+  getPaymentStatus,
+  createStarsInvoice,
+  useBoost
 } from '../controllers/monetizationController';
 
 const router = Router();
@@ -214,6 +217,63 @@ router.get('/limits/search', authMiddleware as any, getSearchLimits as any);
  */
 router.get('/check/boost', authMiddleware as any, checkBoostAvailability as any);
 
-// Удалены эндпоинты супер-лайков и ежедневного пополнения
+/**
+ * @swagger
+ * /api/monetization/payment/{paymentId}/status:
+ *   get:
+ *     summary: Статус платежа (поллинг после возврата с оплаты)
+ *     tags: [Monetization]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: paymentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Статус платежа (pending | applied | canceled | failed)
+ */
+router.get('/payment/:paymentId/status', authMiddleware as any, getPaymentStatus as any);
 
-export default router; 
+/**
+ * @swagger
+ * /api/monetization/stars/invoice:
+ *   post:
+ *     summary: Создать инвойс Telegram Stars (цена определяется сервером)
+ *     tags: [Monetization]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [itemKey]
+ *             properties:
+ *               itemKey:
+ *                 type: string
+ *                 enum: ["premium_1day", "premium_7days", "premium_30days", "premium_forever", "boosts_1", "boosts_5"]
+ *     responses:
+ *       200:
+ *         description: Ссылка на инвойс
+ */
+router.post('/stars/invoice', authMiddleware as any, createStarsInvoice as any);
+
+/**
+ * @swagger
+ * /api/monetization/boost/use:
+ *   post:
+ *     summary: Активировать буст (приоритет в поиске на 30 минут)
+ *     tags: [Monetization]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Буст активирован
+ */
+router.post('/boost/use', authMiddleware as any, useBoost as any);
+
+export default router;

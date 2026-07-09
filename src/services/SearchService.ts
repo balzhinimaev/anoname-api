@@ -119,16 +119,37 @@ export class SearchService {
 
     // Узнаем премиум-статус пользователя (снимок на момент старта поиска)
     let isPremium = false;
+    let isBoosted = false;
     let platform = 'unknown';
     try {
-      const u = await User.findById(userId).select('subscription authProvider').lean();
+      const u = await User.findById(userId).select('subscription authProvider currency').lean();
       if (u) {
         platform = (u as any).authProvider || 'unknown';
         if ((u as any).subscription?.isActive && (u as any).subscription?.type && (u as any).subscription.type !== 'basic') {
           isPremium = true;
         }
+        isBoosted = MonetizationService.isBoostActive(u as any);
       }
     } catch {}
+
+    // Гейтинг расширенных фильтров: точный возрастной диапазон и гео — только Premium.
+    // Клиент блокирует эти поля в UI; здесь — защита от прямых запросов к API/WS.
+    if (!isPremium) {
+      const stripped: string[] = [];
+      if (typeof criteria.desiredAgeMin === 'number' && criteria.desiredAgeMin > 18) { criteria.desiredAgeMin = 18; stripped.push('ageMin'); }
+      if (typeof criteria.desiredAgeMax === 'number' && criteria.desiredAgeMax < 100) { criteria.desiredAgeMax = 100; stripped.push('ageMax'); }
+      if (criteria.useGeolocation) { criteria.useGeolocation = false; criteria.location = undefined; stripped.push('geo'); }
+      if (stripped.length) {
+        try {
+          await AnalyticsEvent.create({
+            userId: new mongoose.Types.ObjectId(userId),
+            telegramId,
+            name: 'filters_stripped_free',
+            props: { stripped }
+          } as any);
+        } catch {}
+      }
+    }
 
     // Создаем объект для нового поиска
     const searchData: any = {
@@ -147,6 +168,7 @@ export class SearchService {
       // Не ограничиваем максимальную дистанцию — ищем без $maxDistance
       maxDistance: undefined,
       isPremium,
+      isBoosted,
       platform
     };
 
@@ -392,11 +414,11 @@ export class SearchService {
       const [geoCandidates, nonGeoCandidates] = await Promise.all([
         // порядок $near = от ближнего к дальнему, НЕ пересортировывать
         Search.find(geoCriteria).limit(CANDIDATE_LIMIT),
-        Search.find(nonGeoCriteria).sort({ isPremium: -1, createdAt: 1 }).limit(CANDIDATE_LIMIT),
+        Search.find(nonGeoCriteria).sort({ isBoosted: -1, isPremium: -1, createdAt: 1 }).limit(CANDIDATE_LIMIT),
       ]);
       candidates = [...geoCandidates, ...nonGeoCandidates];
     } else {
-      candidates = await Search.find(matchCriteria).sort({ isPremium: -1, createdAt: 1 }).limit(20);
+      candidates = await Search.find(matchCriteria).sort({ isBoosted: -1, isPremium: -1, createdAt: 1 }).limit(20);
     }
 
     // Исключаем пары, где есть блок (в любую сторону)
@@ -458,8 +480,11 @@ export class SearchService {
         return pool[0];
       }
 
-      // Приоритезация: premium первыми, затем по времени ожидания (createdAt ASC), и только затем по скору
+      // Приоритезация: буст, затем premium, затем по времени ожидания (createdAt ASC), и только затем по скору
       const sorted = pool.slice().sort((a: any, b: any) => {
+        const ab = a.isBoosted ? 1 : 0;
+        const bb = b.isBoosted ? 1 : 0;
+        if (ab !== bb) return bb - ab; // boosted desc
         const ap = a.isPremium ? 1 : 0;
         const bp = b.isPremium ? 1 : 0;
         if (ap !== bp) return bp - ap; // premium desc

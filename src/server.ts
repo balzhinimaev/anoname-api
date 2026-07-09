@@ -30,6 +30,7 @@ import { WebSocketManager } from './websocket/WebSocketManager';
 import { VoiceService } from './services/VoiceService';
 import { SearchAnalyticsService } from './services/SearchAnalyticsService';
 import { AICompanionService } from './services/AICompanionService';
+import { MonetizationService } from './services/MonetizationService';
 import prelaunchRouter from './routes/prelaunchRoutes';
 import { router as leadRouter } from './routes/leadRoutes';
 import User from './models/User';
@@ -241,6 +242,9 @@ const startServer = async () => {
 
     // Плановая чистка файлов голосовых завершённых чатов (приватность)
     VoiceService.startSweep();
+
+    // Монетизация: экспирация подписок + дожим зависших pending-платежей
+    MonetizationService.startBackgroundJobs();
 
     // Запуск сервера
     httpServer.listen(port, () => {

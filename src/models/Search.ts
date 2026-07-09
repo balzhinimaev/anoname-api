@@ -24,6 +24,7 @@ export interface ISearch {
   maxDistance?: number; // в километрах
   // Премиум-признак на момент начала поиска (снимок для приоритезации очереди)
   isPremium?: boolean;
+  isBoosted?: boolean;
   // Платформа на момент поиска (для сквозной аналитики): telegram | web | vk
   platform?: string;
 
@@ -118,6 +119,10 @@ const searchSchema = new mongoose.Schema<ISearch>({
     type: Boolean,
     default: false
   },
+  isBoosted: {
+    type: Boolean,
+    default: false
+  },
   platform: {
     type: String
   },
@@ -146,8 +151,8 @@ searchSchema.index({ age: 1 });
 searchSchema.index({ rating: 1 });
 // Гео-индекс для поиска по координатам
 searchSchema.index({ location: '2dsphere' });
-// Приоритезация очереди: сначала премиум, затем старшие по времени
-searchSchema.index({ isPremium: -1, createdAt: 1 });
+// Приоритезация очереди: сначала буст, затем премиум, затем старшие по времени
+searchSchema.index({ isBoosted: -1, isPremium: -1, createdAt: 1 });
 // Единственный активный поиск на пользователя
 searchSchema.index(
   { userId: 1, status: 1 },

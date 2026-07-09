@@ -9,6 +9,7 @@ import config from '../config';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import PaymentLog from '../models/Payment';
+import AnalyticsEvent from '../models/AnalyticsEvent';
 
 export interface SubscriptionTier {
   type: 'basic' | 'premium';
@@ -56,9 +57,20 @@ export const SUBSCRIPTION_TIERS: Record<string, SubscriptionTier> = {
       analytics: true
     }
   },
+  premium_30days: {
+    type: 'premium',
+    price: 599,
+    duration: 30, // 30 дней
+    features: {
+      unlimitedSearches: true,
+      advancedFilters: true,
+      priorityInSearch: true,
+      analytics: true
+    }
+  },
   premium_forever: {
     type: 'premium',
-    price: 901,
+    price: 1490,
     duration: -1, // -1 означает навсегда
     features: {
       unlimitedSearches: true,
@@ -81,8 +93,25 @@ export const PURCHASE_ITEMS: Record<string, PurchaseItem> = {
   boosts_5: { type: 'boosts', amount: 5, price: 399 },
   premium_1day: { type: 'subscription', subscriptionType: 'premium', price: 149 },
   premium_7days: { type: 'subscription', subscriptionType: 'premium', price: 299 },
-  premium_forever: { type: 'subscription', subscriptionType: 'premium', price: 901 }
+  premium_30days: { type: 'subscription', subscriptionType: 'premium', price: 599 },
+  premium_forever: { type: 'subscription', subscriptionType: 'premium', price: 1490 }
 };
+
+/**
+ * Цены в Telegram Stars — источник истины на сервере.
+ * Клиентский starCount никогда не используется для определения суммы.
+ */
+export const STARS_PRICES: Record<string, number> = {
+  premium_1day: 100,
+  premium_7days: 200,
+  premium_30days: 400,
+  premium_forever: 1000,
+  boosts_1: 70,
+  boosts_5: 270
+};
+
+/** Сколько действует один буст (приоритет в выдаче поиска). */
+export const BOOST_DURATION_MS = 30 * 60 * 1000;
 
 export class MonetizationService {
   private static toSafeSubscription(sub: IUser['subscription'] | undefined) {
@@ -96,19 +125,66 @@ export class MonetizationService {
   }
 
   /**
-   * Активирует Premium по telegramId (30 дней по текущему тарифу premium)
+   * Разрешает itemKey подписки в ключ тарифа SUBSCRIPTION_TIERS.
+   * Легаси-ключ 'premium' (старые Stars-инвойсы) трактуем как 30 дней.
    */
-  static async activatePremiumByTelegramId(telegramId: string | number): Promise<{ success: boolean; message?: string }> {
+  static resolveSubscriptionTierKey(itemKey?: string): string | null {
+    if (itemKey && SUBSCRIPTION_TIERS[itemKey] && itemKey !== 'basic') return itemKey;
+    if (itemKey === 'premium') return 'premium_30days';
+    return null;
+  }
+
+  /**
+   * Активирует Premium по telegramId (оплата Telegram Stars через бота).
+   * itemKey определяет длительность; starCount сверяется с серверным прайсом.
+   */
+  static async activatePremiumByTelegramId(
+    telegramId: string | number,
+    itemKey?: string,
+    starCount?: number
+  ): Promise<{ success: boolean; message?: string }> {
     const tg = Number(telegramId);
     if (!telegramId || Number.isNaN(tg)) {
       return { success: false, message: 'Invalid telegramId' };
+    }
+    const boostItem = itemKey && PURCHASE_ITEMS[itemKey]?.type === 'boosts' ? itemKey : null;
+    const tierKey = boostItem ? null : this.resolveSubscriptionTierKey(itemKey);
+    if (!tierKey && !boostItem) {
+      return { success: false, message: `Unknown itemKey: ${itemKey}` };
+    }
+    // Защита от недоплаты: сумма в инвойсе обязана совпадать с прайсом
+    const expectedStars = STARS_PRICES[(boostItem || tierKey) as string];
+    if (itemKey !== 'premium' && expectedStars && typeof starCount === 'number' && starCount < expectedStars) {
+      wsLogger.warn('stars_underpayment', `Stars underpayment: got ${starCount}, expected ${expectedStars}`, { telegramId: tg, itemKey, starCount });
+      return { success: false, message: 'Star amount mismatch' };
     }
     const user = await User.findOne({ telegramId: tg }).lean<IUser>();
     if (!user || !user._id) {
       return { success: false, message: 'User not found' };
     }
-    await this.activateSubscription(String((user as any)._id), 'premium');
+    const userId = String((user as any)._id);
+    if (boostItem) {
+      await this.addCurrency(userId, 'boosts', PURCHASE_ITEMS[boostItem].amount || 1);
+    } else {
+      await this.activateSubscription(userId, tierKey as string);
+    }
+    this.trackPaymentEvent('payment_succeeded', userId, {
+      itemKey: boostItem || tierKey,
+      provider: 'stars',
+      stars: starCount ?? expectedStars ?? null
+    });
     return { success: true };
+  }
+
+  /** Событие платёжной воронки в серверную аналитику (best effort). */
+  static trackPaymentEvent(name: string, userId?: string, props?: Record<string, any>): void {
+    try {
+      void AnalyticsEvent.create({
+        userId: userId ? new mongoose.Types.ObjectId(userId) : undefined,
+        name,
+        props
+      } as any).catch(() => {});
+    } catch { /* noop */ }
   }
   /**
    * Проверяет срок действия подписки и деактивирует её при истечении.
@@ -219,31 +295,73 @@ export class MonetizationService {
   /**
    * Проверяет можно ли использовать буст
    */
-  static async canUseBoost(userId: string): Promise<{ canUse: boolean; reason?: string }> {
-    const user = await User.findById(userId);
-    if (!user || !user.currency || user.currency.boosts <= 0) {
-      return { 
-        canUse: false, 
-        reason: 'Недостаточно буостов. Купите буосты в магазине.' 
-      };
+  static async canUseBoost(userId: string): Promise<{ canUse: boolean; reason?: string; boosts?: number; boostActiveUntil?: Date | null }> {
+    const user = await User.findById(userId).select('currency').lean();
+    const boosts = (user as any)?.currency?.boosts || 0;
+    const activeUntil = (user as any)?.currency?.boostActiveUntil || null;
+    if (activeUntil && new Date(activeUntil).getTime() > Date.now()) {
+      return { canUse: false, reason: 'Буст уже активен', boosts, boostActiveUntil: activeUntil };
     }
-
-    return { canUse: true };
+    if (boosts <= 0) {
+      return { canUse: false, reason: 'Недостаточно бустов. Купите бусты в магазине.', boosts, boostActiveUntil: activeUntil };
+    }
+    return { canUse: true, boosts, boostActiveUntil: activeUntil };
   }
 
   /**
-   * Использует буст
+   * Активирует буст: списывает 1 буст и даёт приоритет в выдаче на BOOST_DURATION_MS.
+   * Атомарно: не спишет, если бустов нет или буст уже активен.
    */
-  static async useBoost(userId: string): Promise<void> {
-    await User.findByIdAndUpdate(userId, {
-      $inc: { 'currency.boosts': -1 }
-    });
+  static async useBoost(userId: string): Promise<{ success: boolean; message?: string; boostActiveUntil?: Date; boostsLeft?: number }> {
+    const now = new Date();
+    const until = new Date(now.getTime() + BOOST_DURATION_MS);
+    const updated = await User.findOneAndUpdate(
+      {
+        _id: userId,
+        'currency.boosts': { $gt: 0 },
+        $or: [
+          { 'currency.boostActiveUntil': { $exists: false } },
+          { 'currency.boostActiveUntil': null },
+          { 'currency.boostActiveUntil': { $lte: now } }
+        ]
+      },
+      {
+        $inc: { 'currency.boosts': -1 },
+        $set: { 'currency.boostActiveUntil': until }
+      },
+      { new: true }
+    ).select('currency').lean();
+    if (!updated) {
+      const state = await this.canUseBoost(userId);
+      return { success: false, message: state.reason || 'Буст недоступен', boostsLeft: state.boosts, boostActiveUntil: state.boostActiveUntil || undefined };
+    }
+    this.trackPaymentEvent('boost_used', userId, { until });
+    // Если пользователь сейчас в поиске — поднимем приоритет активной заявки
+    try {
+      const { default: Search } = await import('../models/Search');
+      await (Search as any).updateMany({ userId, status: 'searching' }, { isBoosted: true });
+    } catch { /* noop */ }
+    return { success: true, boostActiveUntil: until, boostsLeft: (updated as any)?.currency?.boosts ?? 0 };
+  }
+
+  /** Активен ли буст у пользователя прямо сейчас. */
+  static isBoostActive(user: Pick<IUser, 'currency'> | null | undefined): boolean {
+    const until = (user as any)?.currency?.boostActiveUntil;
+    return !!until && new Date(until).getTime() > Date.now();
+  }
+
+  /**
+   * Начисляет премиум без оплаты (реферальная награда, промо).
+   */
+  static async grantPremium(userId: string, tierKey: string, source: string): Promise<void> {
+    await this.activateSubscription(userId, tierKey);
+    this.trackPaymentEvent('premium_granted', userId, { tierKey, source });
   }
 
   /**
    * Совершает покупку
    */
-  static async makePurchase(userId: string, itemKey: string): Promise<{ success: boolean; message?: string; redirectUrl?: string; paymentId?: string }> {
+  static async makePurchase(userId: string, itemKey: string, receiptEmail?: string): Promise<{ success: boolean; message?: string; redirectUrl?: string; paymentId?: string }> {
     const item = PURCHASE_ITEMS[itemKey];
     if (!item) {
       return { success: false, message: 'Товар не найден' };
@@ -259,8 +377,11 @@ export class MonetizationService {
     const customerFullName = (user.firstName && user.lastName)
       ? `${user.firstName} ${user.lastName}`
       : (user.firstName || user.username || `User ${user.telegramId}`);
-    // В модели нет телефона/email, поэтому используем технический email на основе Telegram
-    const customerEmail = `${user.username ? user.username : `tg_${user.telegramId}`}@noemail.local`;
+    // Чек 54-ФЗ: если пользователь указал email — шлём туда, иначе технический адрес
+    const isValidEmail = (e?: string) => !!e && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e) && e.length <= 254;
+    const customerEmail = isValidEmail(receiptEmail)
+      ? (receiptEmail as string).trim()
+      : `${user.username ? user.username : `tg_${user.telegramId}`}@noemail.local`;
 
     const receipt: any = {
       customer: {
@@ -296,35 +417,12 @@ export class MonetizationService {
           status: 'pending'
         });
       } catch {}
+      this.trackPaymentEvent('payment_created', userId, { itemKey, amount: item.price, provider: 'yookassa' });
       return { success: true, redirectUrl: paymentResult.redirectUrl, paymentId: paymentResult.paymentId, message: 'Перейдите по ссылке для оплаты' };
     }
 
     // Если платёж уже успешно подтвержден/captured, применяем покупку
-    if (item.type === 'subscription') {
-      if (!item.subscriptionType || item.subscriptionType !== 'premium') {
-        return { success: false, message: 'Неверный тип подписки' };
-      }
-      
-      // Определяем тип подписки по itemKey
-      let subscriptionTier = 'premium_1day'; // по умолчанию
-      if (itemKey === 'premium_7days') subscriptionTier = 'premium_7days';
-      else if (itemKey === 'premium_forever') subscriptionTier = 'premium_forever';
-      
-      await this.activateSubscription(userId, subscriptionTier);
-      
-      const tier = SUBSCRIPTION_TIERS[subscriptionTier];
-      const durationText = tier.duration === -1 ? 'навсегда' : 
-                          tier.duration === 1 ? 'на 1 день' : 
-                          `на ${tier.duration} дней`;
-      
-      return { success: true, message: `Подписка Premium ${durationText} активирована!` };
-    } else {
-      if (!item.amount) {
-        return { success: false, message: 'Неверное количество валюты' };
-      }
-      await this.addCurrency(userId, item.type, item.amount);
-      return { success: true, message: `${item.amount} ${item.type} добавлено к вашему счету!` };
-    }
+    return this.applyPurchaseByItemKey(userId, itemKey);
   }
 
   /**
@@ -437,7 +535,7 @@ export class MonetizationService {
         body: JSON.stringify({
           amount: { value: amount.toFixed(2), currency: 'RUB' },
           capture: true,
-          confirmation: { type: 'redirect', return_url: `${config.clientUrl}/app/?payment=success` },
+          confirmation: { type: 'redirect', return_url: `${config.clientUrl}/app/?payment=return` },
           description,
           metadata,
           receipt
@@ -470,7 +568,7 @@ export class MonetizationService {
   /**
    * Получает платёж из YooKassa и применяет покупку по metadata
    */
-  static async confirmAndApplyPayment(paymentId: string): Promise<{ success: boolean; message?: string }> {
+  static async confirmAndApplyPayment(paymentId: string): Promise<{ success: boolean; status?: string; message?: string }> {
     try {
       const isTest = (config.yookassa.mode || 'test') === 'test';
       const shopId = isTest ? config.yookassa.shopIdTest : config.yookassa.shopIdProd;
@@ -492,11 +590,29 @@ export class MonetizationService {
         return { success: false, message: data?.description || 'Failed to fetch payment' };
       }
 
-      if (!(data && (data.status === 'succeeded' || data.paid === true))) {
-        return { success: false, message: 'Payment not confirmed' };
+      const meta = (data?.metadata || {}) as { userId?: string; itemKey?: string };
+
+      // Платёж отменён/просрочен на стороне YooKassa — фиксируем терминальный статус
+      if (data && data.status === 'canceled') {
+        const prev = await PaymentLog.findOne({ paymentId });
+        if (!prev || prev.status === 'pending') {
+          await PaymentLog.findOneAndUpdate(
+            { paymentId },
+            { status: 'canceled', payload: data },
+            { upsert: true }
+          );
+          this.trackPaymentEvent('payment_canceled', meta.userId, {
+            itemKey: meta.itemKey,
+            reason: data?.cancellation_details?.reason
+          });
+        }
+        return { success: false, status: 'canceled', message: 'Payment canceled' };
       }
 
-      const meta = (data.metadata || {}) as { userId?: string; itemKey?: string };
+      if (!(data && (data.status === 'succeeded' || data.paid === true))) {
+        return { success: false, status: 'pending', message: 'Payment not confirmed' };
+      }
+
       if (!meta.userId || !meta.itemKey) {
         return { success: false, message: 'Missing metadata' };
       }
@@ -505,7 +621,7 @@ export class MonetizationService {
       // Защита от повторной обработки: если уже applied — выходим идемпотентно
       const existing = await PaymentLog.findOne({ paymentId });
       if (existing && existing.status === 'applied') {
-        return { success: true, message: 'Already processed' };
+        return { success: true, status: 'applied', message: 'Already processed' };
       }
 
       const applyResult = await this.applyPurchaseByItemKey(meta.userId, meta.itemKey);
@@ -515,6 +631,13 @@ export class MonetizationService {
           { status: 'applied', payload: data },
           { upsert: true }
         );
+        this.trackPaymentEvent('payment_succeeded', meta.userId, {
+          itemKey: meta.itemKey,
+          amount: Number(data?.amount?.value) || undefined,
+          currency: data?.amount?.currency || 'RUB',
+          provider: 'yookassa',
+          test: data?.test === true
+        });
       } else {
         await PaymentLog.findOneAndUpdate(
           { paymentId },
@@ -522,11 +645,28 @@ export class MonetizationService {
           { upsert: true }
         );
       }
-      return applyResult;
+      return { ...applyResult, status: applyResult.success ? 'applied' : 'failed' };
     } catch (error) {
       wsLogger.error('system', 'yookassa_confirm', error as Error);
       return { success: false, message: 'Confirm exception' };
     }
+  }
+
+  /**
+   * Статус платежа для клиентского поллинга после возврата с оплаты.
+   * pending → активно перепроверяем в YooKassa (и применяем, если оплачен).
+   */
+  static async getPaymentStatusForUser(userId: string, paymentId: string): Promise<{ found: boolean; status?: string; message?: string }> {
+    const log = await PaymentLog.findOne({ paymentId }).lean();
+    if (!log || !log.userId || String(log.userId) !== String(userId)) {
+      return { found: false };
+    }
+    if (log.status === 'pending') {
+      const result = await this.confirmAndApplyPayment(paymentId);
+      const status = (result as any).status || (result.success ? 'applied' : 'pending');
+      return { found: true, status, message: result.message };
+    }
+    return { found: true, status: log.status };
   }
 
   private static async applyPurchaseByItemKey(userId: string, itemKey: string): Promise<{ success: boolean; message?: string }> {
@@ -538,19 +678,19 @@ export class MonetizationService {
       if (!item.subscriptionType || item.subscriptionType !== 'premium') {
         return { success: false, message: 'Неверный тип подписки' };
       }
-      
-      // Определяем тип подписки по itemKey
-      let subscriptionTier = 'premium_1day'; // по умолчанию
-      if (itemKey === 'premium_7days') subscriptionTier = 'premium_7days';
-      else if (itemKey === 'premium_forever') subscriptionTier = 'premium_forever';
-      
+
+      const subscriptionTier = this.resolveSubscriptionTierKey(itemKey);
+      if (!subscriptionTier) {
+        return { success: false, message: 'Неизвестный тариф подписки' };
+      }
+
       await this.activateSubscription(userId, subscriptionTier);
-      
+
       const tier = SUBSCRIPTION_TIERS[subscriptionTier];
-      const durationText = tier.duration === -1 ? 'навсегда' : 
-                          tier.duration === 1 ? 'на 1 день' : 
+      const durationText = tier.duration === -1 ? 'навсегда' :
+                          tier.duration === 1 ? 'на 1 день' :
                           `на ${tier.duration} дней`;
-      
+
       return { success: true, message: `Подписка Premium ${durationText} активирована!` };
     } else {
       if (!item.amount) {
@@ -596,4 +736,65 @@ export class MonetizationService {
       subscriptionType: user.subscription?.type || 'free'
     };
   }
-} 
+
+  // === ФОНОВЫЕ ДЖОБЫ ===
+
+  private static jobsStarted = false;
+
+  /**
+   * Запускает фоновые задачи монетизации:
+   * - экспирация истёкших подписок (каждые 10 мин) — иначе isActive виснет в true
+   *   для пользователей, которые не дергают getUserStatus;
+   * - дожим/чистка зависших pending-платежей (каждый час).
+   */
+  static startBackgroundJobs(): void {
+    if (this.jobsStarted) return;
+    this.jobsStarted = true;
+
+    const expireSubscriptions = async () => {
+      try {
+        const res = await User.updateMany(
+          { 'subscription.isActive': true, 'subscription.endDate': { $ne: null, $lte: new Date() } },
+          {
+            'subscription.isActive': false,
+            'subscription.type': 'basic',
+            'limits.canUseAdvancedFilters': false
+          }
+        );
+        if (res.modifiedCount > 0) {
+          wsLogger.info('subscriptions_expired', `Деактивировано истёкших подписок: ${res.modifiedCount}`, { count: res.modifiedCount });
+        }
+      } catch (e) {
+        wsLogger.error('system', 'subscriptions_expire_job', e as Error);
+      }
+    };
+
+    const reconcilePendingPayments = async () => {
+      try {
+        const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+        const stale = await PaymentLog.find({ status: 'pending', createdAt: { $lte: twoHoursAgo } })
+          .sort({ createdAt: 1 })
+          .limit(20)
+          .lean();
+        for (const log of stale) {
+          // confirmAndApplyPayment сам переведёт в applied/canceled по данным YooKassa
+          await this.confirmAndApplyPayment(log.paymentId).catch(() => {});
+        }
+        // Совсем древние pending без ответа от YooKassa считаем отменёнными
+        const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
+        await PaymentLog.updateMany(
+          { status: 'pending', createdAt: { $lte: twoDaysAgo } },
+          { status: 'canceled' }
+        );
+      } catch (e) {
+        wsLogger.error('system', 'pending_payments_job', e as Error);
+      }
+    };
+
+    setInterval(expireSubscriptions, 10 * 60 * 1000).unref?.();
+    setInterval(reconcilePendingPayments, 60 * 60 * 1000).unref?.();
+    // Прогон при старте, чтобы подхватить накопившееся
+    void expireSubscriptions();
+    void reconcilePendingPayments();
+  }
+}

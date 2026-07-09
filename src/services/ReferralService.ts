@@ -109,8 +109,14 @@ export class ReferralService {
     try {
       const u = await User.findById(userId).select('referredBy');
       if (!u?.referredBy) return;
-      // Здесь можно начислить валюту/подписку/бусты
       await User.findByIdAndUpdate(u.referredBy, { $inc: { 'referralStats.rewardedTotal': 1 } });
+      // Награда: +1 день Premium рефереру за квалифицированного приглашённого
+      try {
+        const { MonetizationService } = await import('./MonetizationService');
+        await MonetizationService.grantPremium(String(u.referredBy), 'premium_1day', 'referral');
+      } catch (e) {
+        logger.warn('referral_premium_grant_failed', { referrerId: String(u.referredBy), error: (e as Error)?.message });
+      }
       // Геймификация: приглашённый дошёл до квалификации
       const { GamificationService } = await import('./GamificationService');
       GamificationService.award(String(u.referredBy), 'referral').catch(() => {});

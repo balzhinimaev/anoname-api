@@ -115,6 +115,8 @@ export interface IUser extends Document {
     boosts: number;
     /** Последнее пополнение бесплатной валюты */
     lastFreeRefill: Date;
+    /** До какого момента активен купленный буст (приоритет в поиске) */
+    boostActiveUntil?: Date | null;
   };
   
   /** Лимиты использования для базовых пользователей */
@@ -223,7 +225,8 @@ const UserSchema: Schema = new Schema({
   
   currency: {
     boosts: { type: Number, default: 0 },
-    lastFreeRefill: { type: Date, default: Date.now }
+    lastFreeRefill: { type: Date, default: Date.now },
+    boostActiveUntil: { type: Date, default: null }
   },
   
   limits: {

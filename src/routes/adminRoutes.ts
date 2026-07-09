@@ -17,6 +17,7 @@ import {
   deleteLeadCampaign,
   previewLeadCampaign,
   launchLeadCampaign,
+  getMonetizationStats,
 } from '../controllers/adminController';
 
 export const router = express.Router();
@@ -34,6 +35,9 @@ router.get('/users/:id', getUserById as any);
 router.get('/prelaunch/stats', getPrelaunchStats as any);
 router.get('/prelaunch/list', getPrelaunchList as any);
 router.get('/prelaunch/export.csv', exportPrelaunchCsv as any);
+
+// Монетизация: выручка/платежи/конверсия
+router.get('/monetization/stats', getMonetizationStats as any);
 
 // Лиды
 router.get('/leads/stats', getLeadStats as any);

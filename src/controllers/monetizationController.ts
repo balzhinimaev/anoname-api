@@ -96,14 +96,14 @@ export const makePurchase = async (req: Request, res: Response): Promise<void> =
       return;
     }
 
-    const { itemKey } = req.body;
-    
+    const { itemKey, email } = req.body;
+
     if (!itemKey) {
       res.status(400).json({ error: 'Необходимо указать товар' });
       return;
     }
 
-    const result = await MonetizationService.makePurchase(userId, itemKey);
+    const result = await MonetizationService.makePurchase(userId, itemKey, typeof email === 'string' ? email : undefined);
     if (!result.success) {
       res.status(400).json({ success: false, error: result.message || 'Ошибка обработки платежа' });
       return;
@@ -263,6 +263,11 @@ export const yookassaWebhook = async (req: Request, res: Response): Promise<void
     const status = event?.object?.status;
     logger.info('YooKassa webhook parsed', { type: 'yookassa_webhook_parsed', eventType, status, paymentId });
     const result = await MonetizationService.confirmAndApplyPayment(paymentId);
+    // Отмена — терминальное состояние: отвечаем 200, чтобы YooKassa не ретраила
+    if (!result.success && result.status === 'canceled') {
+      res.json({ success: true, message: 'Payment canceled' });
+      return;
+    }
     if (!result.success) {
       res.status(400).json({ success: false, error: result.message || 'Payment not confirmed' });
       return;
@@ -305,7 +310,7 @@ export const starsPaymentSuccess = async (req: Request, res: Response): Promise<
       });
     } catch {}
 
-    const result = await MonetizationService.activatePremiumByTelegramId(telegramId);
+    const result = await MonetizationService.activatePremiumByTelegramId(telegramId, itemKey, typeof starCount === 'number' ? starCount : Number(starCount) || undefined);
     if (!result.success) {
       res.status(400).json({ success: false, error: result.message || 'Failed to activate premium' });
       return;
@@ -411,6 +416,99 @@ export const checkBoostAvailability = async (req: Request, res: Response): Promi
 };
 
 /**
- * Проверить возможность использования супер-лайка
+ * Статус платежа для клиентского поллинга (после возврата с YooKassa)
  */
+export const getPaymentStatus = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const token = req.token;
+    const decoded = token ? (jwt.decode(token) as { userId: string }) : null;
+    const userId = decoded?.userId;
+    if (!userId) {
+      res.status(401).json({ error: 'Пользователь не авторизован' });
+      return;
+    }
+    const paymentId = String(req.params.paymentId || '').trim();
+    if (!paymentId || paymentId.length > 128) {
+      res.status(400).json({ error: 'Некорректный paymentId' });
+      return;
+    }
+    const result = await MonetizationService.getPaymentStatusForUser(userId, paymentId);
+    if (!result.found) {
+      res.status(404).json({ success: false, error: 'Платёж не найден' });
+      return;
+    }
+    res.json({ success: true, data: { status: result.status, message: result.message } });
+  } catch (error) {
+    console.error('Ошибка получения статуса платежа:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+};
+
+/**
+ * Создать инвойс Telegram Stars (proxy к боту).
+ * Цена в звёздах берётся из серверного прайса — клиентский starCount игнорируется.
+ */
+export const createStarsInvoice = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const token = req.token;
+    const decoded = token ? (jwt.decode(token) as { userId: string }) : null;
+    if (!decoded?.userId) {
+      res.status(401).json({ error: 'Пользователь не авторизован' });
+      return;
+    }
+    const { itemKey } = req.body || {};
+    const { STARS_PRICES } = await import('../services/MonetizationService');
+    const stars = STARS_PRICES[String(itemKey)];
+    if (!stars) {
+      res.status(400).json({ error: 'Неизвестный товар' });
+      return;
+    }
+    const botUrl = (process.env.BOT_INTERNAL_URL || 'http://anoname-bot:7777').replace(/\/+$/, '');
+    const secret = process.env.BOT_BACKEND_SECRET || '';
+    if (!secret) {
+      res.status(503).json({ error: 'Stars payments not configured' });
+      return;
+    }
+    const response = await fetch(`${botUrl}/monetization/stars/invoice`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': secret },
+      body: JSON.stringify({ itemKey, starCount: stars })
+    });
+    const data: any = await response.json().catch(() => ({}));
+    if (!response.ok || !data?.url) {
+      logger.warn('stars_invoice_failed', { status: response.status, data });
+      res.status(502).json({ error: 'Не удалось создать счёт. Попробуйте позже.' });
+      return;
+    }
+    MonetizationService.trackPaymentEvent('payment_created', decoded.userId, { itemKey, stars, provider: 'stars' });
+    res.json({ url: data.url });
+  } catch (error) {
+    logger.error('stars_invoice_error', { error: (error as Error)?.message });
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+};
+
+/**
+ * Активировать буст (приоритет в поиске на 30 минут, списывает 1 буст)
+ */
+export const useBoost = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const token = req.token;
+    const decoded = token ? (jwt.decode(token) as { userId: string }) : null;
+    if (!decoded?.userId) {
+      res.status(401).json({ error: 'Пользователь не авторизован' });
+      return;
+    }
+    const result = await MonetizationService.useBoost(decoded.userId);
+    if (!result.success) {
+      res.status(400).json({ success: false, error: result.message, data: { boostsLeft: result.boostsLeft, boostActiveUntil: result.boostActiveUntil } });
+      return;
+    }
+    res.json({ success: true, data: { boostActiveUntil: result.boostActiveUntil, boostsLeft: result.boostsLeft } });
+  } catch (error) {
+    console.error('Ошибка активации буста:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+};
+
 // Удалены супер-лайки и ежедневные пополнения как неиспользуемые в UI
