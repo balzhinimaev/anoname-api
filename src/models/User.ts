@@ -109,6 +109,14 @@ export interface IUser extends Document {
     autoRenew: boolean;
   };
   
+  /** Состояние серии реактивационных Web Push (D1/D3/D7) */
+  pushReengagement?: {
+    /** Сколько ступеней серии уже отправлено с момента последней активности */
+    stage: number;
+    /** Когда отправлен последний пуш серии */
+    lastAt: Date;
+  };
+
   /** Виртуальная валюта пользователя */
   currency?: {
     /** Количество "буостов" */
@@ -223,6 +231,11 @@ const UserSchema: Schema = new Schema({
     autoRenew: { type: Boolean, default: false }
   },
   
+  pushReengagement: {
+    stage: { type: Number },
+    lastAt: { type: Date }
+  },
+
   currency: {
     boosts: { type: Number, default: 0 },
     lastFreeRefill: { type: Date, default: Date.now },

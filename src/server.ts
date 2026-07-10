@@ -17,6 +17,7 @@ import { router as chatRouter } from './routes/chatRoutes';
 import { router as authRouter } from './routes/authRoutes';
 import { router as searchRouter } from './routes/searchRoutes';
 import monetizationRouter from './routes/monetizationRoutes';
+import pushRouter from './routes/pushRoutes';
 import { monitoringRouter } from './routes/monitoringRoutes';
 import { router as adminRouter } from './routes/adminRoutes';
 import { router as analyticsRouter } from './routes/analyticsRoutes';
@@ -31,6 +32,7 @@ import { VoiceService } from './services/VoiceService';
 import { SearchAnalyticsService } from './services/SearchAnalyticsService';
 import { AICompanionService } from './services/AICompanionService';
 import { MonetizationService } from './services/MonetizationService';
+import WebPushService from './services/WebPushService';
 import prelaunchRouter from './routes/prelaunchRoutes';
 import { router as leadRouter } from './routes/leadRoutes';
 import User from './models/User';
@@ -165,6 +167,7 @@ app.use('/api/chats', apiLimiter, authMiddleware, chatRouter);
 app.use('/api/search', apiLimiter, searchRouter);
 // Маршруты монетизации: вебхук должен быть публичным, остальные защищаем внутри самого роутера
 app.use('/api/monetization', monetizationRouter);
+app.use('/api/push', pushRouter);
 
 // Error handling middleware
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -245,6 +248,9 @@ const startServer = async () => {
 
     // Монетизация: экспирация подписок + дожим зависших pending-платежей
     MonetizationService.startBackgroundJobs();
+
+    // Web Push: серия реактивации D1/D3/D7 для подписанных веб-пользователей
+    WebPushService.startReengagementJob();
 
     // Запуск сервера
     httpServer.listen(port, () => {
