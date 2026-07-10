@@ -31,6 +31,7 @@ import { WebSocketManager } from './websocket/WebSocketManager';
 import { VoiceService } from './services/VoiceService';
 import { SearchAnalyticsService } from './services/SearchAnalyticsService';
 import { AICompanionService } from './services/AICompanionService';
+import { SettingsService } from './services/SettingsService';
 import { MonetizationService } from './services/MonetizationService';
 import WebPushService from './services/WebPushService';
 import prelaunchRouter from './routes/prelaunchRoutes';
@@ -241,6 +242,9 @@ const startServer = async () => {
     // Запуск очистки токенов
     setupTokenCleanup();
     setupSearchDigest();
+    // Глобальные рантайм-тумблеры (лимиты/ИИ/фейк-статистика) — до прогрева ИИ,
+    // чтобы AICompanionService.enabled сразу видел актуальные флаги из БД.
+    await SettingsService.init().catch((e) => logger.warn('SettingsService init failed', { error: (e as Error)?.message }));
     AICompanionService.warmup().catch(() => {}); // прогрев кэша ИИ-персон (isPersona сразу рабочий)
 
     // Плановая чистка файлов голосовых завершённых чатов (приватность)

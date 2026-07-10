@@ -18,11 +18,29 @@ import {
   previewLeadCampaign,
   launchLeadCampaign,
   getMonetizationStats,
+  getGlobalSettings,
+  updateGlobalSettings,
 } from '../controllers/adminController';
 
 export const router = express.Router();
 
-// Все маршруты требуют аутентификацию и права администратора
+// Глобальные тумблеры (лимиты/ИИ/фейк-статистика): админ (JWT) ИЛИ статический
+// ключ — тот же, что у дашборда аналитики (страница /admin/settings.html).
+// Регистрируем ДО общего router.use(authMiddleware, requireAdmin).
+const SETTINGS_KEY = process.env.ANALYTICS_ADMIN_TOKEN || '';
+const keyOrAdmin: express.RequestHandler[] = [
+  (req, _res, next) => {
+    const k = (req.query.key as string) || String(req.headers['x-admin-key'] || '');
+    if (SETTINGS_KEY && k === SETTINGS_KEY) { (req as any)._keyOk = true; }
+    next();
+  },
+  (req, res, next) => (req as any)._keyOk ? next() : (authMiddleware as express.RequestHandler)(req, res, next),
+  (req, res, next) => (req as any)._keyOk ? next() : (requireAdmin as express.RequestHandler)(req, res, next),
+];
+router.get('/settings', ...keyOrAdmin, getGlobalSettings as any);
+router.put('/settings', ...keyOrAdmin, updateGlobalSettings as any);
+
+// Все маршруты ниже требуют аутентификацию и права администратора
 router.use(authMiddleware, requireAdmin);
 
 // Поиск пользователей

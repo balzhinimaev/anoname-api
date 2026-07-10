@@ -6,6 +6,7 @@ import { wsLogger } from '../utils/logger';
 import logger from '../utils/logger';
 import User from '../models/User';
 import { MonetizationService } from './MonetizationService';
+import { SettingsService } from './SettingsService';
 import { BlockService } from './BlockService';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { ReferralService } from './ReferralService';
@@ -974,7 +975,8 @@ export class SearchService {
   private static fakeWalk: { online: number; searching: number; inChat: number; avgSec: number; at: number } | null = null;
   private static fakeBoost() {
     const zero = { online: 0, onlineM: 0, onlineF: 0, searching: 0, searchingM: 0, searchingF: 0, inChat: 0, matches24h: 0, avgSec: 0 };
-    if (config.honestMode || String(process.env.FAKE_STATS_ENABLED ?? 'true') === 'false') return zero;
+    // Рантайм-тумблер из админки (env FAKE_STATS_ENABLED — только начальное значение)
+    if (config.honestMode || !SettingsService.flags.fakeStatsEnabled) return zero;
     const scale = Number(process.env.FAKE_STATS_SCALE || 1) || 1;
     const now = Date.now();
     const mskHour = (((new Date(now).getUTCHours() + 3) % 24) + 24) % 24;
@@ -1011,7 +1013,7 @@ export class SearchService {
    * avgSearchTime не трогаем (это не счётчик). Без фейка — без персонализации.
    */
   static personalizeStats(stats: SearchStatsSnapshot, userId: string): SearchStatsSnapshot {
-    if (config.honestMode || String(process.env.FAKE_STATS_ENABLED ?? 'true') === 'false') return stats;
+    if (config.honestMode || !SettingsService.flags.fakeStatsEnabled) return stats;
     let h = 2166136261;
     const s = String(userId);
     for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }

@@ -6,6 +6,7 @@ import Search, { ISearch } from '../models/Search';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { GamificationService } from './GamificationService';
 import { MonetizationService } from './MonetizationService';
+import { SettingsService } from './SettingsService';
 import { wsManager } from '../server';
 import config from '../config';
 import { wsLogger } from '../utils/logger';
@@ -95,7 +96,8 @@ class AICompanionServiceImpl {
 
   get enabled(): boolean {
     if (config.honestMode) return false; // «честный режим»: фикция выключена целиком
-    return String(process.env.AI_COMPANION_ENABLED ?? 'true') !== 'false' && !!config.openai.apiKey;
+    // Рантайм-тумблер из админки (env AI_COMPANION_ENABLED — только начальное значение)
+    return SettingsService.flags.aiCompanionsEnabled && !!config.openai.apiKey;
   }
 
   /** Является ли участник ИИ-персоной (по mongo _id). Персона «всегда онлайн». */
@@ -113,8 +115,12 @@ class AICompanionServiceImpl {
     }
   }
 
-  /** HONEST_MODE: завершает все активные ИИ-чаты как «собеседник покинул чат». */
-  private async endActiveAiChats(): Promise<void> {
+  /**
+   * Завершает все активные ИИ-чаты как «собеседник покинул чат».
+   * Вызывается при HONEST_MODE на старте и при выключении тумблера
+   * «ИИ-собеседники» в админке (SettingsService.update).
+   */
+  async endActiveAiChats(): Promise<void> {
     const personaObjectIds = [...this.idToPersona.keys()].map((id) => new mongoose.Types.ObjectId(id));
     if (personaObjectIds.length === 0) return;
     const chats = await Chat.find({ isActive: true, participants: { $in: personaObjectIds } })
@@ -484,6 +490,8 @@ class AICompanionServiceImpl {
    */
   private armAiChatTtl(chatId: string, personaId: string, userId: string): void {
     void (async () => {
+      // Тумблер «авто-разрыв ИИ-чата» выключен — не выкидываем никого.
+      if (!SettingsService.flags.aiChatTtlEnabled) return;
       try {
         const quota = await MonetizationService.getSearchQuota(userId);
         if (quota.premium) return; // Premium — без разрыва
@@ -503,6 +511,8 @@ class AICompanionServiceImpl {
 
   /** Разрывает ИИ-чат как «собеседник покинул чат» (для не-премиум по таймеру). */
   private async endAiChatByTtl(chatId: string, personaId: string): Promise<void> {
+    // Тумблер могли выключить, пока таймер тикал — тогда не рвём диалог.
+    if (!SettingsService.flags.aiChatTtlEnabled) return;
     if (!(await this.chatActive(chatId))) return;
     // Гасим любые отложенные ходы персоны, чтобы не писать после разрыва.
     const pend = this.pendingTimers.get(chatId); if (pend) { clearTimeout(pend); this.pendingTimers.delete(chatId); }

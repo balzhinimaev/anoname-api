@@ -336,3 +336,58 @@ export const getMonetizationStats = async (req: Request, res: Response): Promise
     res.status(500).json({ error: 'Не удалось получить статистику монетизации' });
   }
 };
+
+/**
+ * Глобальные рантайм-тумблеры продукта (лимиты поиска / ИИ-собеседники /
+ * авто-разрыв ИИ-чата / фиктивная статистика).
+ * GET /api/admin/settings — текущее состояние + метаданные.
+ * PUT /api/admin/settings — частичное обновление флагов (body: { <flag>: boolean }).
+ */
+export const getGlobalSettings = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const { SettingsService } = await import('../services/SettingsService');
+    const config = (await import('../config')).default;
+    await SettingsService.refresh().catch(() => {});
+    res.json({
+      success: true,
+      flags: SettingsService.flags,
+      meta: {
+        // HONEST_MODE=true в .env принудительно выключает фикцию независимо от тумблеров
+        honestMode: config.honestMode,
+        searchHourlyLimit: Number(process.env.SEARCH_HOURLY_LIMIT || 2),
+        aiChatTtlSec: [
+          Math.round(Number(process.env.AI_CHAT_TTL_MIN_MS || 40000) / 1000),
+          Math.round(Number(process.env.AI_CHAT_TTL_MAX_MS || 70000) / 1000),
+        ],
+        aiModel: process.env.AI_COMPANION_MODEL || 'gpt-4o',
+        updatedAt: SettingsService.updatedInfo.updatedAt || null,
+        updatedBy: SettingsService.updatedInfo.updatedBy || null,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Не удалось получить настройки' });
+  }
+};
+
+export const updateGlobalSettings = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { SettingsService } = await import('../services/SettingsService');
+    const { GLOBAL_SETTINGS_FLAG_KEYS } = await import('../models/GlobalSettings');
+    const body = (req.body || {}) as Record<string, unknown>;
+    const patch: Record<string, boolean> = {};
+    for (const k of GLOBAL_SETTINGS_FLAG_KEYS) {
+      if (typeof body[k] === 'boolean') patch[k] = body[k] as boolean;
+    }
+    if (Object.keys(patch).length === 0) {
+      res.status(400).json({ error: 'Нет валидных флагов в теле запроса' });
+      return;
+    }
+    const updatedBy = (req as any)._keyOk
+      ? 'admin-key'
+      : String((req as any).user?.telegramId || (req as any).user?.userId || 'admin');
+    const flags = await SettingsService.update(patch, updatedBy);
+    res.json({ success: true, flags });
+  } catch (error) {
+    res.status(500).json({ error: 'Не удалось обновить настройки' });
+  }
+};

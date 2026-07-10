@@ -9,6 +9,7 @@ import config from '../config';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import PaymentLog from '../models/Payment';
+import { SettingsService } from './SettingsService';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 
 export interface SubscriptionTier {
@@ -226,6 +227,8 @@ export class MonetizationService {
    * Списание делает consumeSearch() на старте поиска.
    */
   static async canUserSearch(userId: string): Promise<{ canSearch: boolean; reason?: string; remaining?: number; resetInMin?: number; premium?: boolean }> {
+    // Рантайм-тумблер из админки: лимиты выключены — поиск без ограничений всем.
+    if (!SettingsService.flags.searchLimitsEnabled) return { canSearch: true };
     const user = await User.findById(userId).select('subscription limits').lean();
     if (!user) return { canSearch: false, reason: 'Пользователь не найден' };
     if (this.isPremium((user as any).subscription)) return { canSearch: true, premium: true };
@@ -249,6 +252,11 @@ export class MonetizationService {
 
   /** Текущая квота поиска (read-only) для показа счётчика «осталось N». remaining=-1 у Premium (безлимит). */
   static async getSearchQuota(userId: string): Promise<{ premium: boolean; limit: number; remaining: number; resetInMin: number }> {
+    // Лимиты выключены глобально: отдаём «безлимит» (premium=true — клиент
+    // рисует „безлимитный поиск“ и не показывает счётчик остатка).
+    if (!SettingsService.flags.searchLimitsEnabled) {
+      return { premium: true, limit: this.SEARCH_LIMIT, remaining: -1, resetInMin: 0 };
+    }
     const user = await User.findById(userId).select('subscription limits').lean();
     if (!user) return { premium: false, limit: this.SEARCH_LIMIT, remaining: this.SEARCH_LIMIT, resetInMin: 0 };
     if (this.isPremium((user as any).subscription)) return { premium: true, limit: this.SEARCH_LIMIT, remaining: -1, resetInMin: 0 };
@@ -267,6 +275,7 @@ export class MonetizationService {
 
   /** Атомарно списывает одну попытку часового лимита (вызывать на старте поиска, если не Premium). */
   static async consumeSearch(userId: string): Promise<void> {
+    if (!SettingsService.flags.searchLimitsEnabled) return; // лимиты выключены — не списываем
     const user = await User.findById(userId).select('subscription limits');
     if (!user) return;
     if (this.isPremium((user as any).subscription)) return; // Premium — не списываем
