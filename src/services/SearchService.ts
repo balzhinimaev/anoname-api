@@ -10,6 +10,7 @@ import { BlockService } from './BlockService';
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { ReferralService } from './ReferralService';
 import { GamificationService } from './GamificationService';
+import config from '../config';
 
 export interface SearchCriteria {
   gender: 'male' | 'female';
@@ -966,13 +967,14 @@ export class SearchService {
    * Фиктивный «живой» слой поверх реальной статистики (иначе видно, что пусто).
    * Стабилен в пределах ~3-минутного окна (не прыгает на каждом бродкасте),
    * плавно меняется по времени суток (МСК), с перекосом на женщин под мужскую
-   * аудиторию. Отключается FAKE_STATS_ENABLED=false. Настройка масштаба —
+   * аудиторию. Отключается FAKE_STATS_ENABLED=false или разом с ИИ через
+   * HONEST_MODE=true (config.honestMode). Настройка масштаба —
    * FAKE_STATS_SCALE (множитель, дефолт 1).
    */
   private static fakeWalk: { online: number; searching: number; inChat: number; avgSec: number; at: number } | null = null;
   private static fakeBoost() {
     const zero = { online: 0, onlineM: 0, onlineF: 0, searching: 0, searchingM: 0, searchingF: 0, inChat: 0, matches24h: 0, avgSec: 0 };
-    if (String(process.env.FAKE_STATS_ENABLED ?? 'true') === 'false') return zero;
+    if (config.honestMode || String(process.env.FAKE_STATS_ENABLED ?? 'true') === 'false') return zero;
     const scale = Number(process.env.FAKE_STATS_SCALE || 1) || 1;
     const now = Date.now();
     const mskHour = (((new Date(now).getUTCHours() + 3) % 24) + 24) % 24;
@@ -1009,7 +1011,7 @@ export class SearchService {
    * avgSearchTime не трогаем (это не счётчик). Без фейка — без персонализации.
    */
   static personalizeStats(stats: SearchStatsSnapshot, userId: string): SearchStatsSnapshot {
-    if (String(process.env.FAKE_STATS_ENABLED ?? 'true') === 'false') return stats;
+    if (config.honestMode || String(process.env.FAKE_STATS_ENABLED ?? 'true') === 'false') return stats;
     let h = 2166136261;
     const s = String(userId);
     for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }

@@ -96,6 +96,14 @@ export default {
     const normalized = String(id);
     return this.adminTelegramIds.has(normalized);
   },
+  /**
+   * «Честный режим»: HONEST_MODE=true разом отключает всю фикцию —
+   * фиктивную статистику онлайна (FAKE_STATS_*) и ИИ-собеседников
+   * (AI_COMPANION_*). Активные ИИ-чаты при старте аккуратно завершаются
+   * («собеседник покинул чат»), чтобы люди не ждали ответа. Гранулярные
+   * флаги продолжают работать, когда HONEST_MODE выключен.
+   */
+  honestMode: String(process.env.HONEST_MODE || 'false').toLowerCase() === 'true',
   // Сервисные API-ключи (для технической аутентификации)
   serviceApiKeys: (() => {
     const raw = process.env.SERVICE_API_KEYS || process.env.API_KEYS || process.env.API_KEY || '';

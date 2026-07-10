@@ -94,6 +94,7 @@ class AICompanionServiceImpl {
   private aiChatTtlTimers = new Map<string, NodeJS.Timeout>(); // chatId -> таймер авто-разрыва (не-премиум)
 
   get enabled(): boolean {
+    if (config.honestMode) return false; // «честный режим»: фикция выключена целиком
     return String(process.env.AI_COMPANION_ENABLED ?? 'true') !== 'false' && !!config.openai.apiKey;
   }
 
@@ -105,6 +106,28 @@ class AICompanionServiceImpl {
   /** Прогрев кэша персон при старте — чтобы isPersona работал сразу (даже для старых ИИ-чатов). */
   async warmup(): Promise<void> {
     try { await this.ensurePersonas(); } catch { /* noop */ }
+    // Честный режим: персоны отвечать не будут, поэтому не оставляем людей
+    // ждать в замолчавших ИИ-чатах — аккуратно завершаем их при старте.
+    if (config.honestMode) {
+      this.endActiveAiChats().catch(() => {});
+    }
+  }
+
+  /** HONEST_MODE: завершает все активные ИИ-чаты как «собеседник покинул чат». */
+  private async endActiveAiChats(): Promise<void> {
+    const personaObjectIds = [...this.idToPersona.keys()].map((id) => new mongoose.Types.ObjectId(id));
+    if (personaObjectIds.length === 0) return;
+    const chats = await Chat.find({ isActive: true, participants: { $in: personaObjectIds } })
+      .select('_id participants')
+      .lean();
+    if (chats.length === 0) return;
+    const { ChatService } = await import('./ChatService');
+    for (const c of chats) {
+      const personaId = (c.participants as unknown[]).map(String).find((p) => this.idToPersona.has(p));
+      if (!personaId) continue;
+      await ChatService.endChat(String(c._id), personaId, 'partner_disconnected').catch(() => {});
+    }
+    wsLogger.info('honest_mode_ai_chats_ended', `HONEST_MODE: завершено активных ИИ-чатов: ${chats.length}`, { count: chats.length });
   }
 
   private async ensurePersonas(): Promise<void> {
