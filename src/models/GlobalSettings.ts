@@ -15,6 +15,12 @@ export interface IGlobalSettingsFlags {
   aiChatTtlEnabled: boolean;
   /** Фиктивный слой статистики онлайна поверх реальных чисел. */
   fakeStatsEnabled: boolean;
+  /**
+   * «Закрытый клуб» в TG мини-аппе: отложенный запуск — вместо приложения
+   * показывается экран листа ожидания. Админы (ADMIN_TELEGRAM_IDS) проходят
+   * мимо гейта (cohort='admin' в ответах auth/profile). Веб/VK не затрагивает.
+   */
+  tmaPrelaunchEnabled: boolean;
 }
 
 export const GLOBAL_SETTINGS_FLAG_KEYS: (keyof IGlobalSettingsFlags)[] = [
@@ -22,6 +28,7 @@ export const GLOBAL_SETTINGS_FLAG_KEYS: (keyof IGlobalSettingsFlags)[] = [
   'aiCompanionsEnabled',
   'aiChatTtlEnabled',
   'fakeStatsEnabled',
+  'tmaPrelaunchEnabled',
 ];
 
 export interface IGlobalSettings extends Document, IGlobalSettingsFlags {
@@ -38,6 +45,7 @@ const GlobalSettingsSchema = new Schema<IGlobalSettings>(
     aiCompanionsEnabled: { type: Boolean, required: true, default: true },
     aiChatTtlEnabled: { type: Boolean, required: true, default: true },
     fakeStatsEnabled: { type: Boolean, required: true, default: true },
+    tmaPrelaunchEnabled: { type: Boolean, required: true, default: false },
     updatedBy: { type: String },
   },
   { timestamps: true }

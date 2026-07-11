@@ -14,6 +14,8 @@ const ENV_DEFAULTS: IGlobalSettingsFlags = {
   aiCompanionsEnabled: envBool(process.env.AI_COMPANION_ENABLED, true),
   aiChatTtlEnabled: true,
   fakeStatsEnabled: envBool(process.env.FAKE_STATS_ENABLED, true),
+  // Закрытый клуб TG мини-аппа: по умолчанию выключен (обычный запуск)
+  tmaPrelaunchEnabled: String(process.env.TMA_PRELAUNCH_ENABLED || 'false').toLowerCase() === 'true',
 };
 
 const REFRESH_MS = 15_000;

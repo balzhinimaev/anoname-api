@@ -485,7 +485,8 @@ export class LeadCampaignService {
       case 'all_leads':
         return withRegistrationFilter;
       case 'prelaunch_only':
-        return withRegistrationFilter;
+        // Только лиды из предстартовой очереди (раньше сегмент был no-op = all_leads)
+        return { ...withRegistrationFilter, prelaunched: true };
       case 'inactive_7_days':
         return {
           ...withRegistrationFilter,

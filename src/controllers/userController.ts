@@ -5,6 +5,7 @@ import logger from '../utils/logger';
 import { BlockService } from '../services/BlockService';
 import { ReferralService } from '../services/ReferralService';
 import { MonetizationService } from "../services/MonetizationService";
+import config from '../config';
 
 // Поля, доступные для просмотра другими пользователями (публичный профиль).
 // Идентифицирующие поля (telegramId/username/lastActive) исключены намеренно:
@@ -141,6 +142,11 @@ export const getUser = async (req: Request, res: Response): Promise<void> => {
     if (!user) {
       res.status(404).json({ error: 'Пользователь не найден' });
       return;
+    }
+    // Владельцу-админу отдаём cohort='admin' (только в ответе, БД не трогаем) —
+    // фронтовый гейт «закрытого клуба» (allowFull) пропускает его к приложению.
+    if ((isOwner || isAdmin) && config.isAdminTelegramId(String(telegramId))) {
+      (user as any).cohort = 'admin';
     }
     res.status(200).json(isOwner || isAdmin ? user : toPublicUser(user));
   } catch (error) {

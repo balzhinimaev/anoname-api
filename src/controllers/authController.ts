@@ -6,6 +6,14 @@ import config from '../config';
 import crypto from 'crypto';
 import { isInitDataFresh, verifyTelegramWebAppInitData } from '../utils/telegram';
 import { getCohortVariant } from '../utils/experiments';
+
+/**
+ * Когорта для ОТВЕТА клиенту: админам отдаём 'admin' — фронтовый гейт
+ * «закрытого клуба» (allowFull) пропускает их к полному приложению.
+ * В БД когорта не меняется (A/B-аналитика не затрагивается).
+ */
+const responseCohort = (user: { telegramId?: unknown; cohort?: string }): string | undefined =>
+  config.isAdminTelegramId(String(user.telegramId)) ? 'admin' : user.cohort;
 import AnalyticsEvent from '../models/AnalyticsEvent';
 import { ReferralService } from '../services/ReferralService';
 import { wsManager } from '../server';
@@ -393,7 +401,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
         lastName: user.lastName,
         profilePhoto: user.profilePhoto,
         rating: user.rating || 0,
-        cohort: user.cohort,
+        cohort: responseCohort(user),
         referralCode: myReferralCode
       }
     });
@@ -489,7 +497,8 @@ export const login = async (req: Request, res: Response): Promise<void> => {
             firstName: user.firstName,
             lastName: user.lastName,
             profilePhoto: (user as any).profilePhoto,
-            rating: user.rating || 0
+            rating: user.rating || 0,
+            cohort: responseCohort(user)
           }
         });
         return;
@@ -519,7 +528,8 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         firstName: user.firstName,
         lastName: user.lastName,
         profilePhoto: (user as any).profilePhoto,
-        rating: user.rating || 0
+        rating: user.rating || 0,
+        cohort: responseCohort(user)
       }
     });
   } catch (error) {
