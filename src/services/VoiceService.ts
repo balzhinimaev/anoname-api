@@ -99,9 +99,12 @@ class VoiceServiceImpl {
       if (now - last < config.voice.minIntervalMs) {
         throw new VoiceError(429, 'Too many voice messages, slow down');
       }
-      const countInChat = await Message.countDocuments({ chatId, type: 'voice' });
-      if (countInChat >= config.voice.maxPerChat) {
-        throw new VoiceError(429, 'Voice message limit for this chat reached');
+      // 0 disables the conversation quota; per-upload and anti-flood limits remain.
+      if (config.voice.maxPerChat > 0) {
+        const countInChat = await Message.countDocuments({ chatId, type: 'voice' });
+        if (countInChat >= config.voice.maxPerChat) {
+          throw new VoiceError(429, 'Voice message limit for this chat reached');
+        }
       }
 
       // Транскод (и одновременно санитайзер формата)

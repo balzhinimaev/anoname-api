@@ -7,8 +7,11 @@ import express from 'express';
 import { body } from 'express-validator';
 import * as chatController from '../controllers/chatController';
 import { validateRequest } from '../middleware/validateRequest';
+import { getPartnerProfile } from '../controllers/partnerProfileController';
 
 export const router = express.Router();
+
+router.get('/:chatId/partner-profile', getPartnerProfile as express.RequestHandler);
 
 /**
  * @swagger

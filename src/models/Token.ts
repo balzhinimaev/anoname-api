@@ -51,7 +51,7 @@ const tokenSchema = new mongoose.Schema<IToken>({
   platform: {
     type: String,
     required: true,
-    enum: ['telegram', 'web', 'mobile', 'api', 'vk'],
+    enum: ['telegram', 'web', 'mobile', 'api', 'vk', 'telegram_bot'],
     default: 'telegram'
   }
 }, {

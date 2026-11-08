@@ -11,7 +11,12 @@ import * as vkAuthController from '../controllers/vkAuthController';
 import { validateRequest } from '../middleware/validateRequest';
 import { authMiddleware } from '../middleware/authMiddleware';
 
+import { botAuth } from '../middleware/botAuth';
+import { createBotSession } from '../controllers/botSessionController';
+
 export const router = express.Router();
+
+router.post('/bot/session', botAuth, createBotSession as express.RequestHandler);
 
 /**
  * @swagger

@@ -90,7 +90,7 @@ export const createOrUpdateUser = async (req: Request, res: Response): Promise<v
 
     const body = req.body || {};
     // Разрешаем обновлять только безопасные поля профиля
-    const allowedFields = ['username', 'firstName', 'lastName', 'bio', 'gender', 'age'] as const;
+    const allowedFields = ['username', 'firstName', 'lastName', 'bio', 'gender', 'age', 'lookingFor', 'interests'] as const;
     const update: Record<string, unknown> = {};
     for (const key of allowedFields) {
       if (Object.prototype.hasOwnProperty.call(body, key)) {

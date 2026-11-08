@@ -141,6 +141,7 @@ export default {
     maxDurationSec: parsePositiveInt(process.env.VOICE_MAX_DURATION_SEC, 60),
     // Минимальный интервал между голосовыми от одного юзера
     minIntervalMs: parsePositiveInt(process.env.VOICE_MIN_INTERVAL_MS, 5_000),
+    // 0 = unlimited messages per chat; upload size/duration and anti-flood stay enabled.
     maxPerChat: parsePositiveInt(process.env.VOICE_MAX_PER_CHAT, 30),
   },
   // OpenAI — генерация айсбрейкеров (тем/вопросов) для оживления анонимного диалога

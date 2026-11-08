@@ -41,6 +41,9 @@ export interface IUser extends Document {
   lastName?: string;
   /** Описание профиля пользователя */
   bio?: string;
+  /** Voluntary mini-profile, visible to matched conversation partners. */
+  lookingFor?: '' | 'chat' | 'friendship' | 'relationship' | 'support' | 'open';
+  interests?: string[];
   /** Пол пользователя */
   gender?: 'male' | 'female' | 'other';
   /** Рейтинг пользователя */
@@ -186,7 +189,9 @@ const UserSchema: Schema = new Schema({
   username: { type: String },
   firstName: { type: String },
   lastName: { type: String },
-  bio: { type: String },
+  bio: { type: String, maxlength: 300 },
+  lookingFor: { type: String, enum: ['', 'chat', 'friendship', 'relationship', 'support', 'open'], default: '' },
+  interests: { type: [{ type: String, maxlength: 24 }], default: [], validate: (items: string[]) => items.length <= 6 },
   gender: { type: String, enum: ['male', 'female', 'other'] },
   rating: { type: Number, default: 0 },
   preferences: {

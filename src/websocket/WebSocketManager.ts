@@ -3,7 +3,7 @@ import { Server as HttpServer } from 'http';
 import { socketAuth } from './middleware/auth';
 import { ClientToServerEvents, ServerToClientEvents, SocketData, TypedSocket } from './types';
 import { ChatService } from '../services/ChatService';
-import { SearchService, SearchCriteria, SearchStatsSnapshot } from '../services/SearchService';
+import { SearchService, SearchCriteria, SearchStatsSnapshot, SearchLimitError } from '../services/SearchService';
 import { MonetizationService } from '../services/MonetizationService';
 import { wsLogger } from '../utils/logger';
 import { metricsCollector } from '../utils/metrics';
@@ -207,7 +207,8 @@ export class WebSocketManager {
 
       const activeChat = await Chat.findOne({ participants: new mongoose.Types.ObjectId(userId), isActive: true });
       if (!activeChat) {
-        socket.emit('session:state', {});
+        const activeSearch = await SearchService.getUserActiveSearch(userId);
+        socket.emit('session:state', { searchStatus: activeSearch ? 'searching' : 'idle' });
         return;
       }
       const chatId = activeChat._id.toString();
@@ -401,7 +402,7 @@ export class WebSocketManager {
       socket.on('search:start', (data) => {
         if (!this.wsRateAllow(userId)) {
           metricsCollector.wsRateLimited('search:start');
-          socket.emit('error', { message: 'Too many requests' });
+          socket.emit('search:error', { message: 'Слишком много запросов. Попробуйте через несколько секунд.' });
           return;
         }
         const parsed = searchCriteriaSchema.safeParse(data?.criteria);
@@ -414,7 +415,7 @@ export class WebSocketManager {
           const startTime = Date.now();
           metricsCollector.searchStarted();
           wsLogger.event('search_start', userId, socket.id, { criteria: data.criteria });
-          this.handleSearchStart(socket, data).then(() => {
+          this.handleSearchStart(socket, { criteria: parsed.data }).then(() => {
             const duration = Date.now() - startTime;
             metricsCollector.messageProcessed(duration);
             metricsCollector.searchCompleted(true);
@@ -432,7 +433,7 @@ export class WebSocketManager {
       socket.on('search:cancel', () => {
         if (!this.wsRateAllow(userId)) {
           metricsCollector.wsRateLimited('search:cancel');
-          socket.emit('error', { message: 'Too many requests' });
+          socket.emit('search:cancel_error', { message: 'Слишком много запросов. Повторите отмену через несколько секунд.' });
           return;
         }
         const startTime = Date.now();
@@ -1455,16 +1456,6 @@ export class WebSocketManager {
           return;
         }
       }
-      // Часовой лимит поиска (бесплатно): при исчерпании — структурное событие
-      // search:limit, чтобы клиент показал окно оплаты Premium (а не просто ошибку).
-      const limit = await MonetizationService.canUserSearch(userId);
-      if (!limit.canSearch) {
-        this.sendToUser(userId, 'search:limit', { message: limit.reason, resetInMin: limit.resetInMin });
-        this.sendToUser(userId, 'search:error', { message: limit.reason || 'Лимит поисков исчерпан' });
-        void this.sendSearchQuota(userId);
-        return;
-      }
-
       const result = await SearchService.startSearch(
         userId,
         socket.data.user.telegramId,
@@ -1472,8 +1463,10 @@ export class WebSocketManager {
       );
 
       if (result.status === 'searching') {
-        socket.emit('search:status', { status: 'searching' });
+        this.sendToUser(userId, 'search:status', { status: 'searching' });
         this.armAiMatch(userId);
+      } else if (result.status === 'matched') {
+        await this.emitSessionState(socket);
       } else if (result.status === 'cancelled' || result.status === 'expired') {
         socket.emit('search:expired');
       }
@@ -1481,6 +1474,10 @@ export class WebSocketManager {
       void this.sendSearchQuota(userId);
     } catch (error) {
       wsLogger.error('handle_search_start_error', userId, error as Error);
+      if (error instanceof SearchLimitError) {
+        this.sendToUser(userId, 'search:limit', { message: error.message, resetInMin: error.resetInMin });
+        void this.sendSearchQuota(userId);
+      }
       this.sendToUser(userId, 'search:error', {
         message: error instanceof Error ? error.message : 'An unknown error occurred during search.'
       });
@@ -1535,10 +1532,10 @@ export class WebSocketManager {
       // Отменяем поиск через сервис
       const cancelledSearch = await SearchService.cancelSearch(userId);
       
+      // Cancellation is idempotent: acknowledge even an already stopped search.
+      socket.leave(`search:${userId}`);
+      this.sendToUser(userId, 'search:status', { status: 'cancelled' });
       if (cancelledSearch) {
-        // Удаляем пользователя из комнаты поиска
-        socket.leave(`search:${userId}`);
-        socket.emit('search:status', { status: 'cancelled' });
         
         // Обновляем статус активности пользователя, чтобы убедиться что он остается активным
         User.findByIdAndUpdate(userId, {
@@ -1550,7 +1547,7 @@ export class WebSocketManager {
       }
 
     } catch (error) {
-      socket.emit('error', { 
+      socket.emit('search:cancel_error', {
         message: error instanceof Error ? error.message : 'Failed to cancel search'
       });
     }

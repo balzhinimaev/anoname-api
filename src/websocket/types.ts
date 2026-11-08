@@ -104,6 +104,7 @@ export interface ServerToClientEvents {
 
   // Снимок сессии после connect/restore
   'session:state': (data: {
+    searchStatus?: 'searching' | 'idle';
     activeChatId?: string;
     partnerStatus?: {
       chatId: string;
@@ -152,6 +153,7 @@ export interface ServerToClientEvents {
 
   'error': (data: { message: string }) => void;
 
+  'search:cancel_error': (data: { message: string }) => void;
   'search:error': (data: { message: string }) => void;
   'search:limit': (data: { message?: string; resetInMin?: number }) => void;
   'search:quota': (data: { premium: boolean; limit: number; remaining: number; resetInMin: number }) => void;

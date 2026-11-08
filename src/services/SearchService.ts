@@ -49,7 +49,30 @@ export interface SearchStatsSnapshot {
   avgSearchTime: { t: number; m: number; f: number; matches24h: number };
 }
 
+export class SearchLimitError extends Error {
+  constructor(message: string, public readonly resetInMin?: number) {
+    super(message);
+    this.name = 'SearchLimitError';
+  }
+}
+
 export class SearchService {
+  // One API process owns all sockets in this deployment. Serialize per user,
+  // including disconnect cancellation; other users still search concurrently.
+  // Multiple API workers would require a shared lock, not separate local queues.
+  private static searchCommands = new Map<string, Promise<void>>();
+
+  private static enqueueSearchCommand<T>(userId: string, run: () => Promise<T>): Promise<T> {
+    const previous = this.searchCommands.get(userId) || Promise.resolve();
+    const result = previous.then(run);
+    const tail = result.then(() => {}, () => {});
+    this.searchCommands.set(userId, tail);
+    void tail.then(() => {
+      if (this.searchCommands.get(userId) === tail) this.searchCommands.delete(userId);
+    });
+    return result;
+  }
+
   // Статистика считается ТОЛЬКО полным пересчётом из БД (несколько countDocuments
   // по индексам). Инкрементальный слой удалён сознательно: он дрейфовал
   // (двойные декременты, потерянные инкременты, вечное продление TTL кэша).
@@ -69,6 +92,19 @@ export class SearchService {
     telegramId: string,
     criteria: SearchCriteria
   ): Promise<SearchResult> {
+    return this.enqueueSearchCommand(userId, () => this.startSearchOnce(userId, telegramId, { ...criteria }));
+  }
+
+  private static async startSearchOnce(
+    userId: string, telegramId: string, criteria: SearchCriteria
+  ): Promise<SearchResult> {
+    // Repeated start (double tap, second tab, reconnect) resumes the same search.
+    // It must not replace the queue position or charge another attempt.
+    const existing = await Search.findOne({ userId, status: 'searching' });
+    if (existing) return this.toSearchResult(existing);
+    const activeChat = await Chat.findOne({ participants: new mongoose.Types.ObjectId(userId), isActive: true });
+    if (activeChat) return { status: 'matched', userId: new mongoose.Types.ObjectId(userId), telegramId };
+
     wsLogger.info('search_service_entered', `SearchService.startSearch entered for user ${userId}`, { userId, telegramId });
     // === ПРОВЕРКА МОНЕТИЗАЦИИ ===
     wsLogger.info('monetization_check_start', `Checking monetization for user ${userId}`, { userId });
@@ -76,7 +112,7 @@ export class SearchService {
     wsLogger.info('monetization_check_end', `Monetization check for user ${userId} completed`, { userId, canSearch });
     if (!canSearch.canSearch) {
       wsLogger.warn('monetization_fail', `Search denied for user ${userId} due to monetization`, { userId, reason: canSearch.reason });
-      throw new Error(canSearch.reason || 'Поиск недоступен');
+      throw new SearchLimitError(canSearch.reason || 'Поиск недоступен', canSearch.resetInMin);
     }
 
     // Списываем попытку часового лимита на СТАРТЕ поиска (каждый поиск = попытка;
@@ -111,13 +147,6 @@ export class SearchService {
       location: criteria.location,
       maxDistance: criteria.maxDistance
     });
-
-    // Отменяем предыдущий поиск, если есть (перебит новым поиском того же юзера)
-    const superseded = await Search.findOneAndUpdate(
-      { userId, status: 'searching' },
-      { status: 'cancelled' }
-    );
-    if (superseded) { void this.logSearchEnd(superseded, 'cancelled', 'superseded'); }
 
     // Узнаем премиум-статус пользователя (снимок на момент старта поиска)
     let isPremium = false;
@@ -254,7 +283,13 @@ export class SearchService {
     // Атомарно обновляем статистику после начала поиска
     await this.broadcastSearchStats();
 
-    // Преобразуем результат в SearchResult
+    // A transaction (including another user's match) updates Mongo, not this
+    // original document. Never announce "searching" after a successful match.
+    const current = await Search.findById(search._id);
+    return this.toSearchResult(current || search);
+  }
+
+  private static toSearchResult(search: ISearch): SearchResult {
     return {
       status: search.status as 'searching' | 'matched' | 'cancelled' | 'expired',
       userId: search.userId,
@@ -268,6 +303,10 @@ export class SearchService {
   }
 
   static async cancelSearch(userId: string, reason: 'user' | 'disconnect' | 'superseded' = 'user') {
+    return this.enqueueSearchCommand(userId, () => this.cancelSearchOnce(userId, reason));
+  }
+
+  private static async cancelSearchOnce(userId: string, reason: 'user' | 'disconnect' | 'superseded') {
     const search = await Search.findOneAndUpdate(
       { userId, status: 'searching' },
       { status: 'cancelled' },
@@ -1028,6 +1067,7 @@ export class SearchService {
   }
 
   static async getUserActiveSearch(userId: string) {
+    await this.searchCommands.get(userId);
     return await Search.findOne({
       userId,
       status: 'searching'
